@@ -30,5 +30,5 @@ class StartupTests(unittest.TestCase):
         state=self.root/'state';state.mkdir()
         (state/'startup-migration.json').write_text(m.json.dumps({'previous':self.cmd}))
         with patch.object(m,'STATE',state),patch('kakao_update.prepare_handoff') as handoff:
-            m.stop_migrated_service();handoff.assert_called_once_with(self.root)
+            m.stop_migrated_service();handoff.assert_called_once_with(self.root.resolve())
 if __name__=='__main__':unittest.main()
