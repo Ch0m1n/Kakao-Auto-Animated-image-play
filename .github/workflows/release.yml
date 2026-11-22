@@ -34,6 +34,8 @@ jobs:
         run: |
           python tools/test-kakao-update.py
           if ($LASTEXITCODE) { throw 'Updater test failed' }
+          python tools/test-kakao-startup-migration.py
+          if ($LASTEXITCODE) { throw 'Startup migration test failed' }
           node tools/test-kakao-resolution.cjs
           if ($LASTEXITCODE) { throw 'Rendering test failed' }
       - name: Build executable

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
@@ -72,12 +72,24 @@ internal static class KakaoAutoPlayLauncher
                 }
             }
             Application.EnableVisualStyles();
-            string previous=null;bool resume=false;
+            string previous=null;bool resume=false,startInTray=false;
             for(int i=0;i<args.Length;i++) {
                 if(args[i]=="--upgrade-from"&&i+1<args.Length)previous=args[++i];
                 else if(args[i]=="--resume")resume=true;
+                else if(args[i]=="--tray")startInTray=true;
             }
-            Application.Run(new AutoPlayForm(BundleRoot,previous,resume));
+            bool first;
+            string instanceName="Local\\KakaoAutoPlay.UI."+Path.GetFileName(BundleRoot);
+            using(var instance=new System.Threading.Mutex(true,instanceName,out first))
+            using(var restore=new System.Threading.EventWaitHandle(false,System.Threading.EventResetMode.AutoReset,instanceName+".Restore")) {
+                if(!first){restore.Set();return 0;}
+                using(var form=new AutoPlayForm(BundleRoot,previous,resume,startInTray))
+                using(var restoreTimer=new System.Windows.Forms.Timer {Interval=300}) {
+                    restoreTimer.Tick+=delegate {if(restore.WaitOne(0))form.RestoreWindow();};restoreTimer.Start();
+                    Application.Run(form);
+                }
+                instance.ReleaseMutex();
+            }
             return 0;
         }
         catch (Exception error)

@@ -59,16 +59,44 @@ internal class AutoPlayForm : Form
     readonly Label phase,detail,playing,downloads,notice;
     readonly SoftButton start,stop,startup,diagnostics,logs,update;
     readonly Timer timer=new Timer();
-    bool busy,updateAvailable,lastActionOk;
-    public AutoPlayForm(string bundle,string previousBundle=null,bool resume=false) {
+    readonly NotifyIcon tray=new NotifyIcon();
+    readonly ContextMenuStrip trayMenu=new ContextMenuStrip();
+    readonly string settingsPath=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"KakaoAutoPlay","settings.json");
+    bool busy,updateAvailable,lastActionOk,exitRequested,closeToTray=true;
+    public bool HiddenInTray { get { return !Visible && tray.Visible; } }
+    public void RestoreWindow(){Show();WindowState=FormWindowState.Normal;Activate();}
+    void ExitApplication(){if(busy){RestoreWindow();notice.Text="작업을 마친 뒤 완전 종료를 다시 눌러 주세요.";return;}exitRequested=true;Close();}
+    void ShowOptions(){
+        using(var dialog=new Form {Text="Kakao AutoPlay 옵션",ClientSize=new Size(390,160),FormBorderStyle=FormBorderStyle.FixedDialog,StartPosition=FormStartPosition.CenterParent,MaximizeBox=false,MinimizeBox=false,Font=Font}) {
+            var label=new Label {Text="창의 X 버튼을 누르면",Left=20,Top=20,AutoSize=true};
+            var choices=new ComboBox {Left=20,Top=50,Width=350,DropDownStyle=ComboBoxStyle.DropDownList};
+            choices.Items.AddRange(new object[]{"트레이로 숨기고 계속 재생 (기본)","프로그램과 재생 작업 종료"});choices.SelectedIndex=closeToTray?0:1;
+            var save=new Button {Text="저장",Left=280,Top=110,Width=90};
+            save.Click+=delegate {
+                try {
+                    var values=new Dictionary<string,object>();
+                    if(File.Exists(settingsPath))values=json.Deserialize<Dictionary<string,object>>(File.ReadAllText(settingsPath))??values;
+                    values["closeToTray"]=choices.SelectedIndex==0;
+                    Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
+                    string temp=settingsPath+"."+Guid.NewGuid().ToString("N")+".tmp";
+                    try{File.WriteAllText(temp,json.Serialize(values),Encoding.UTF8);if(File.Exists(settingsPath))File.Replace(temp,settingsPath,null);else File.Move(temp,settingsPath);}finally{if(File.Exists(temp))File.Delete(temp);}
+                    closeToTray=choices.SelectedIndex==0;dialog.Close();
+                }catch(Exception error){MessageBox.Show(dialog,"설정을 저장하지 못했어요: "+error.Message);}
+            };
+            dialog.Controls.AddRange(new Control[]{label,choices,save});dialog.AcceptButton=save;dialog.ShowDialog(this);
+        }
+    }
+    public AutoPlayForm(string bundle,string previousBundle=null,bool resume=false,bool startInTray=false) {
         root=bundle;state=Path.Combine(root,"artifacts","kakao-internals");
         using(var self=Process.GetCurrentProcess()){ownerPid=self.Id;ownerCreated=self.StartTime.ToUniversalTime().ToFileTimeUtc();}
         BindOwner();
+        try{var settings=json.Deserialize<Dictionary<string,object>>(File.ReadAllText(settingsPath));object value;if(settings.TryGetValue("closeToTray",out value)&&value is bool)closeToTray=(bool)value;}catch{}
         Text="Kakao AutoPlay";ClientSize=new Size(584,758);MinimumSize=Size;MaximumSize=Size;
         AutoScaleDimensions=new SizeF(96,96);AutoScaleMode=AutoScaleMode.Dpi;
         FormBorderStyle=FormBorderStyle.FixedSingle;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
         BackColor=Color.FromArgb(245,247,248);Font=new Font("맑은 고딕",10);ForeColor=ink;DoubleBuffered=true;
-        AddLabel(this,"AUTOPLAY / PERSONAL",28,24,400,22,9,muted,true);
+        AddLabel(this,"AUTOPLAY / PERSONAL",28,24,350,22,9,muted,true);
+        var options=Button(this,"옵션",456,18,100,34,false);options.Click+=delegate {ShowOptions();};
         AddLabel(this,"움짤은, 움직이게.",28,53,510,45,25,ink,true);
         AddLabel(this,"GIF와 WebP를 채팅방에서 자동으로, 계속.",30,105,520,26,11,muted,false);
         var card=new SoftPanel {Left=28,Top=153,Width=528,Height=240};Controls.Add(card);
@@ -102,10 +130,26 @@ internal class AutoPlayForm : Form
             if(updateAvailable&&MessageBox.Show(this,"새 버전을 다운로드하고 실행할까요?\n재생 중이면 안전하게 중지한 뒤 다시 이어가요.","Kakao AutoPlay 업데이트",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
             await Action(updateAvailable?"update-install":"update-check",null);
         };
-        notice=AddLabel(this,"창을 닫거나 도우미를 종료하면 재생 작업도 정리돼요.",30,698,520,48,9,muted,false);
+        notice=AddLabel(this,"X는 트레이로 숨겨요. 완전 종료는 트레이 메뉴에서 할 수 있어요.",30,698,520,48,9,muted,false);
         timer.Interval=2000;timer.Tick+=delegate {RefreshStatus();};timer.Start();
-        FormClosed+=delegate {timer.Stop();timer.Dispose();StopOwnedPlayback();};RefreshStatus();
-        if(previousBundle!=null)Shown+=async delegate {await Action("update-adopt",previousBundle);if(lastActionOk&&resume)await Action("start",null);};
+        tray.Text="Kakao AutoPlay";tray.Icon=SystemIcons.Application;tray.ContextMenuStrip=trayMenu;
+        trayMenu.Items.Add("열기",null,delegate {RestoreWindow();});
+        trayMenu.Items.Add("옵션",null,delegate {RestoreWindow();ShowOptions();});
+        trayMenu.Items.Add(new ToolStripSeparator());
+        trayMenu.Items.Add("완전 종료",null,delegate {ExitApplication();});
+        tray.DoubleClick+=delegate {RestoreWindow();};tray.Visible=true;
+        FormClosing+=delegate(object sender,FormClosingEventArgs e){
+            if(e.CloseReason==CloseReason.UserClosing&&!exitRequested){
+                if(closeToTray){e.Cancel=true;Hide();}
+                else if(busy){e.Cancel=true;notice.Text="작업을 마친 뒤 종료해 주세요.";}
+            }
+        };
+        FormClosed+=delegate {timer.Stop();timer.Dispose();tray.Visible=false;tray.Dispose();trayMenu.Dispose();StopOwnedPlayback();};RefreshStatus();
+        Shown+=async delegate {
+            if(startInTray)Hide();
+            await Action(previousBundle!=null?"update-adopt":"startup-migrate",previousBundle);
+            if(resume)await Action("start",null);
+        };
     }
     void BindOwner(){
         Directory.CreateDirectory(state);string path=Path.Combine(state,"autoplay-owner.json"),temporary=Path.Combine(state,"owner-"+Guid.NewGuid().ToString("N")+".tmp");
@@ -164,6 +208,7 @@ internal class AutoPlayForm : Form
             string result=await Task.Run(()=>{
                 var info=new ProcessStartInfo(Path.Combine(root,"runtime","python.exe"),"\""+Path.Combine(root,"tools","kakao-portable-launcher.py")+"\" "+action+" --json"+(output==null?"":" --output \""+output+"\""));
                 info.UseShellExecute=false;info.CreateNoWindow=true;info.RedirectStandardOutput=true;info.RedirectStandardError=true;
+                info.EnvironmentVariables["KAKAO_AUTOPLAY_EXE"]=Application.ExecutablePath;
                 info.StandardOutputEncoding=Encoding.UTF8;info.StandardErrorEncoding=Encoding.UTF8;info.EnvironmentVariables["PYTHONIOENCODING"]="utf-8";
                 using(var process=Process.Start(info)) {
                     var stderr=process.StandardError.ReadToEndAsync();string stdout=process.StandardOutput.ReadToEnd();process.WaitForExit();
@@ -184,7 +229,7 @@ internal class AutoPlayForm : Form
                 if(action=="update-install"&&info.ContainsKey("path")) {
                     string arguments="--upgrade-from \""+root+"\""+(Value(info,"resume","False")=="True"?" --resume":"");
                     Process.Start(new ProcessStartInfo(Convert.ToString(info["path"]),arguments){UseShellExecute=false});
-                    Close();
+                    exitRequested=true;Close();
                 }
             }
         } catch(Exception error) {notice.ForeColor=Color.FromArgb(175,62,44);notice.Text=error.Message;}

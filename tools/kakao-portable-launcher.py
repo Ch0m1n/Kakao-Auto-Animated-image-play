@@ -64,18 +64,70 @@ def stop_previous_bundles(root=None, clock=time.time, pause=time.sleep):
     raise RuntimeError('이전 버전 도우미가 종료 처리 중이에요. 기존 도우미에서 중지를 누른 뒤 다시 시작해주세요.')
 
 
-def migrate_existing_startup(previous):
-    if not previous:
-        return
-    known = {subprocess.list2cmdline([str(old/'runtime/pythonw.exe'),str(old/'tools/kakao-portable-launcher.py'),'--background']) for old in previous}
+def startup_command():
+    exe=os.environ.get('KAKAO_AUTOPLAY_EXE')
+    if exe:
+        path=Path(exe)
+        if not path.is_absolute() or path.suffix.lower()!='.exe' or not path.is_file():
+            raise ValueError('자동 시작 실행 파일 경로를 확인하지 못했어요.')
+        return subprocess.list2cmdline([str(path),'--tray','--resume'])
+    return subprocess.list2cmdline([str(PYTHON),str(Path(__file__).resolve()),'--background'])
+
+
+def known_startup(command):
+    # Recognize exact argument shapes, never execute the saved command.
+    tokens=re.findall(r'"[^"\r\n]*"|[^\s"]+',command)
+    if ' '.join(tokens)!=command.strip():return False
+    args=[value.strip('"') for value in tokens]
+    if len(args)==3 and args[1:]==['--tray','--resume']:
+        path=Path(args[0])
+        if not path.is_file() or not path.name.lower().startswith('kakaoautoplay') or path.suffix.lower()!='.exe':return False
+        # Our launcher embeds a named payload; unrelated executables are not adopted.
+        if path.stat().st_size>200*1024*1024:return False
+        with path.open('rb') as stream:
+            if stream.read(2)!=b'MZ':return False
+            tail=b''
+            while True:
+                block=stream.read(1024*1024)
+                if not block:return False
+                data=tail+block
+                if b'payload.zip' in data:return True
+                tail=data[-16:]
+    if len(args) not in (2,3) or (len(args)==3 and args[2]!='--background'):return False
+    if Path(args[0]).name.lower() not in ('python.exe','pythonw.exe'):return False
+    script=Path(args[1])
+    if script.name not in ('kakao-portable-launcher.py','kakao-autoplay-service.py') or not script.is_file():return False
+    source=script.read_text(encoding='utf-8-sig')
+    return 'kakao-internals' in source and ('KakaoGifAutoPlay' in source or 'kakao-bitmap-bridge.js' in source)
+
+
+def migrate_existing_startup(previous=None):
+    known={subprocess.list2cmdline([str(old/'runtime/pythonw.exe'),str(old/'tools/kakao-portable-launcher.py'),'--background']) for old in (previous or [])}
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER,RUN_KEY,0,winreg.KEY_QUERY_VALUE|winreg.KEY_SET_VALUE) as key:
-            current = winreg.QueryValueEx(key,RUN_NAME)[0]
-            if current in known:
-                command = subprocess.list2cmdline([str(PYTHON),str(Path(__file__).resolve()),'--background'])
-                winreg.SetValueEx(key,RUN_NAME,0,winreg.REG_SZ,command)
+            current=winreg.QueryValueEx(key,RUN_NAME)[0]
+            command=startup_command()
+            if current==command:return False
+            if current not in known and not known_startup(current):
+                raise RuntimeError('자동 시작 항목을 확인하지 못해 유지했어요. 등록 명령: '+current)
+            STATE.mkdir(parents=True,exist_ok=True)
+            (STATE/'startup-migration.json').write_text(json.dumps({'previous':current,'current':command},ensure_ascii=False),encoding='utf-8')
+            winreg.SetValueEx(key,RUN_NAME,0,winreg.REG_SZ,command)
+            return True
     except FileNotFoundError:
-        pass
+        return False
+
+
+def stop_migrated_service():
+    try:command=json.loads((STATE/'startup-migration.json').read_text(encoding='utf-8'))['previous']
+    except (FileNotFoundError,ValueError,KeyError):return
+    if not known_startup(command):return
+    args=[value.strip('"') for value in re.findall(r'"[^"\r\n]*"|[^\s"]+',command)]
+    if len(args)<2 or Path(args[1]).suffix!='.py':return
+    old=Path(args[1]).resolve().parents[1]
+    if old==ROOT.resolve():return
+    from kakao_update import prepare_handoff
+    prepare_handoff(old)
 
 
 def check():
@@ -98,14 +150,14 @@ def check():
 
 
 def startup(enable):
-    command = subprocess.list2cmdline([str(PYTHON), str(Path(__file__).resolve()), '--background'])
+    command = startup_command()
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
         try:
             current = winreg.QueryValueEx(key, RUN_NAME)[0]
         except FileNotFoundError:
             current = None
-        if current and current != command:
-            raise RuntimeError('다른 폴더의 자동 시작 설정이 있어요. 기존 도우미에서 먼저 중지해 주세요.')
+        if current and current != command and not known_startup(current):
+            raise RuntimeError('알 수 없는 자동 시작 등록을 유지했어요. 등록 명령: '+current)
         if enable:
             winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, command)
         elif current:
@@ -117,6 +169,9 @@ def run(action, output=None, background=False):
     if action in ('update-check','update-install'):
         import kakao_update
         return kakao_update.check() if action=='update-check' else kakao_update.install()
+    if action == 'startup-migrate':
+        changed=migrate_existing_startup()
+        return '기존 자동 시작 설정을 새 버전으로 전환했어요.' if changed else 'X 버튼 동작은 옵션에서 바꿀 수 있어요. 완전 종료는 트레이 메뉴를 이용해 주세요.'
     if action == 'update-adopt':
         previous=Path(output or '').resolve()
         base=Path(os.environ['LOCALAPPDATA'])/'KakaoAutoPlay/bundles'
@@ -136,6 +191,7 @@ def run(action, output=None, background=False):
     if background:prepare_background(STATE)
     elif not owner_alive(STATE):return '도우미 창이 종료되어 재생을 시작하지 않았어요.'
     migrate_existing_startup(stop_previous_bundles())
+    stop_migrated_service()
     if action == 'startup':
         startup(True)
     # Wait for any previous stop request to finish before removing its signal.
@@ -171,7 +227,7 @@ def run(action, output=None, background=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', nargs='?', choices=['start','stop','startup','check','diagnostics','update-check','update-install','update-adopt'], default='start')
+    parser.add_argument('action', nargs='?', choices=['start','stop','startup','check','diagnostics','update-check','update-install','update-adopt','startup-migrate'], default='start')
     parser.add_argument('--background', action='store_true')
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--output')

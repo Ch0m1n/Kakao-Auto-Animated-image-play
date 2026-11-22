@@ -57,7 +57,9 @@ class HandoffTests(unittest.TestCase):
         fake=self.registry(command);m.migrate_existing_startup([self.old])
         self.assertEqual(len(fake.writes),1);self.assertIn(str(m.PYTHON),fake.writes[0])
     def test_unrelated_startup_is_not_overwritten(self):
-        fake=self.registry('unrelated-app-command');m.migrate_existing_startup([self.old]);self.assertEqual(fake.writes,[])
+        fake=self.registry('unrelated-app-command')
+        with self.assertRaises(RuntimeError):m.migrate_existing_startup([self.old])
+        self.assertEqual(fake.writes,[])
     def test_missing_startup_is_not_enabled(self):
         fake=self.registry(None);m.migrate_existing_startup([self.old]);self.assertEqual(fake.writes,[])
 
