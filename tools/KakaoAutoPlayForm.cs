@@ -57,14 +57,14 @@ internal class AutoPlayForm : Form
     readonly JavaScriptSerializer json=new JavaScriptSerializer();
     readonly Color ink=Color.FromArgb(29,43,51),muted=Color.FromArgb(98,112,120);
     readonly Label phase,detail,playing,downloads,notice;
-    readonly SoftButton start,stop,startup,diagnostics,logs;
+    readonly SoftButton start,stop,startup,diagnostics,logs,update;
     readonly Timer timer=new Timer();
-    bool busy;
-    public AutoPlayForm(string bundle) {
+    bool busy,updateAvailable,lastActionOk;
+    public AutoPlayForm(string bundle,string previousBundle=null,bool resume=false) {
         root=bundle;state=Path.Combine(root,"artifacts","kakao-internals");
         using(var self=Process.GetCurrentProcess()){ownerPid=self.Id;ownerCreated=self.StartTime.ToUniversalTime().ToFileTimeUtc();}
         BindOwner();
-        Text="Kakao AutoPlay";ClientSize=new Size(584,694);MinimumSize=Size;MaximumSize=Size;
+        Text="Kakao AutoPlay";ClientSize=new Size(584,758);MinimumSize=Size;MaximumSize=Size;
         AutoScaleDimensions=new SizeF(96,96);AutoScaleMode=AutoScaleMode.Dpi;
         FormBorderStyle=FormBorderStyle.FixedSingle;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
         BackColor=Color.FromArgb(245,247,248);Font=new Font("맑은 고딕",10);ForeColor=ink;DoubleBuffered=true;
@@ -93,9 +93,19 @@ internal class AutoPlayForm : Form
         logs=Button(this,"로그 폴더 열기",299,565,257,42,false);
         diagnostics.Click+=async delegate {await Action("diagnostics",null);};
         logs.Click+=delegate {Directory.CreateDirectory(state);Process.Start("explorer.exe","\""+state+"\"");};
-        notice=AddLabel(this,"창을 닫거나 도우미를 종료하면 재생 작업도 정리돼요.",30,628,520,48,9,muted,false);
+        string version="알 수 없음";
+        try{version=Convert.ToString(json.Deserialize<Dictionary<string,object>>(File.ReadAllText(Path.Combine(root,"version.json")))["version"]);}catch{}
+        AddLabel(this,"현재 버전  "+version,30,632,310,24,11,ink,true);
+        AddLabel(this,"GitHub Releases에서 새 버전을 확인해요.",30,661,320,23,9,muted,false);
+        update=Button(this,"업데이트 확인",367,635,189,42,false);
+        update.Click+=async delegate {
+            if(updateAvailable&&MessageBox.Show(this,"새 버전을 다운로드하고 실행할까요?\n재생 중이면 안전하게 중지한 뒤 다시 이어가요.","Kakao AutoPlay 업데이트",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
+            await Action(updateAvailable?"update-install":"update-check",null);
+        };
+        notice=AddLabel(this,"창을 닫거나 도우미를 종료하면 재생 작업도 정리돼요.",30,698,520,48,9,muted,false);
         timer.Interval=2000;timer.Tick+=delegate {RefreshStatus();};timer.Start();
         FormClosed+=delegate {timer.Stop();timer.Dispose();StopOwnedPlayback();};RefreshStatus();
+        if(previousBundle!=null)Shown+=async delegate {await Action("update-adopt",previousBundle);if(lastActionOk&&resume)await Action("start",null);};
     }
     void BindOwner(){
         Directory.CreateDirectory(state);string path=Path.Combine(state,"autoplay-owner.json"),temporary=Path.Combine(state,"owner-"+Guid.NewGuid().ToString("N")+".tmp");
@@ -146,7 +156,8 @@ internal class AutoPlayForm : Form
     }
     async Task Action(string action,string output) {
         if(busy)return;busy=true;
-        foreach(var b in new[]{start,stop,startup,diagnostics,logs})b.Enabled=false;
+        lastActionOk=false;
+        foreach(var b in new[]{start,stop,startup,diagnostics,logs,update})b.Enabled=false;
         notice.ForeColor=muted;notice.Text=action=="diagnostics"?"진단 기록을 모으고 있어요…":"요청을 처리하고 있어요…";
         try {
             if(action=="start"||action=="startup")BindOwner();
@@ -162,9 +173,21 @@ internal class AutoPlayForm : Form
             });
             var response=json.Deserialize<Dictionary<string,object>>(result);
             bool ok=Value(response,"ok","False")=="True";
+            lastActionOk=ok;
             notice.ForeColor=ok?Color.FromArgb(29,115,83):Color.FromArgb(175,62,44);
             notice.Text=ok&&action=="diagnostics"?"진단 ZIP을 저장했어요. ‘로그 폴더 열기’에서 찾을 수 있어요.":Value(response,"message","처리를 마쳤어요.");
+            if(ok&&(action=="update-check"||action=="update-install")) {
+                var info=response["message"] as Dictionary<string,object>;
+                updateAvailable=Value(info,"available","False")=="True";
+                update.Text=updateAvailable?"v"+Value(info,"latest","")+" 업데이트":"업데이트 확인";
+                notice.Text=updateAvailable?"새 버전이 있어요. 업데이트 버튼을 눌러 설치할 수 있어요.":Value(info,"notPublished","False")=="True"?"아직 공개된 배포 버전이 없어요.":"현재 최신 버전을 사용하고 있어요.";
+                if(action=="update-install"&&info.ContainsKey("path")) {
+                    string arguments="--upgrade-from \""+root+"\""+(Value(info,"resume","False")=="True"?" --resume":"");
+                    Process.Start(new ProcessStartInfo(Convert.ToString(info["path"]),arguments){UseShellExecute=false});
+                    Close();
+                }
+            }
         } catch(Exception error) {notice.ForeColor=Color.FromArgb(175,62,44);notice.Text=error.Message;}
-        finally {busy=false;foreach(var b in new[]{startup,diagnostics,logs})b.Enabled=true;RefreshStatus();}
+        finally {busy=false;if(!IsDisposed){foreach(var b in new[]{startup,diagnostics,logs,update})b.Enabled=true;RefreshStatus();}}
     }
 }

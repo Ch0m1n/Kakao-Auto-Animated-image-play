@@ -1,0 +1,54 @@
+name: Build and publish release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag matching version.json (e.g. v11.0.0)'
+        required: true
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check version and prepare dependencies
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $version = (Get-Content version.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -ne "v$version") { throw 'Tag/version mismatch' }
+          ./tools/prepare-dev.ps1 -PythonPath (Get-Command python).Source
+      - name: Test updater and rendering
+        shell: pwsh
+        run: |
+          python tools/test-kakao-update.py
+          if ($LASTEXITCODE) { throw 'Updater test failed' }
+          node tools/test-kakao-resolution.cjs
+          if ($LASTEXITCODE) { throw 'Rendering test failed' }
+      - name: Build executable
+        shell: pwsh
+        run: |
+          ./tools/build-kakao-exe.ps1 -Name KakaoAutoPlay -PythonPath (Get-Command python).Source
+          $hash = (Get-FileHash artifacts/KakaoAutoPlay.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  KakaoAutoPlay.exe" | Set-Content artifacts/SHA256SUMS.txt
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release create $env:RELEASE_TAG artifacts/KakaoAutoPlay.exe artifacts/SHA256SUMS.txt --verify-tag --draft --title "Kakao AutoPlay $env:RELEASE_TAG" --generate-notes
+          if ($LASTEXITCODE) { throw 'Release upload failed' }
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE) { throw 'Release publication failed' }

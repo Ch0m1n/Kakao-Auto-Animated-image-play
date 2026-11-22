@@ -72,7 +72,12 @@ internal static class KakaoAutoPlayLauncher
                 }
             }
             Application.EnableVisualStyles();
-            Application.Run(new AutoPlayForm(BundleRoot));
+            string previous=null;bool resume=false;
+            for(int i=0;i<args.Length;i++) {
+                if(args[i]=="--upgrade-from"&&i+1<args.Length)previous=args[++i];
+                else if(args[i]=="--resume")resume=true;
+            }
+            Application.Run(new AutoPlayForm(BundleRoot,previous,resume));
             return 0;
         }
         catch (Exception error)

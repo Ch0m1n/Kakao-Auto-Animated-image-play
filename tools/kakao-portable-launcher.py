@@ -114,6 +114,16 @@ def startup(enable):
 
 def run(action, output=None, background=False):
     STATE.mkdir(parents=True, exist_ok=True)
+    if action in ('update-check','update-install'):
+        import kakao_update
+        return kakao_update.check() if action=='update-check' else kakao_update.install()
+    if action == 'update-adopt':
+        previous=Path(output or '').resolve()
+        base=Path(os.environ['LOCALAPPDATA'])/'KakaoAutoPlay/bundles'
+        if previous.parent!=base.resolve() or not re.fullmatch('[0-9a-f]{16}',previous.name):
+            raise ValueError('이전 버전 경로가 올바르지 않아요.')
+        migrate_existing_startup([previous])
+        return '업데이트 설정을 이어받았어요.'
     if action == 'diagnostics':
         return '진단 ZIP을 저장했어요.\n' + export_diagnostics(output)
     if action == 'stop':
@@ -161,7 +171,7 @@ def run(action, output=None, background=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', nargs='?', choices=['start','stop','startup','check','diagnostics'], default='start')
+    parser.add_argument('action', nargs='?', choices=['start','stop','startup','check','diagnostics','update-check','update-install','update-adopt'], default='start')
     parser.add_argument('--background', action='store_true')
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--output')
