@@ -25,6 +25,28 @@ class DiagnosticsTests(unittest.TestCase):
             for private in ['private-media','private-id','example.invalid','private-token',str(d.ROOT)]:
                 self.assertNotIn(private,data)
             json.loads(z.read('launcher-events.jsonl').decode().splitlines()[0])
+    def test_qt_counts_without_media_metadata(self):
+        result=d.qt_summary({'engine':'qt6-live','active':2,'loops':8,'downloadInFlight':4,'states':[
+            {'album':True,'format':'webp','frames':304,'changes':609,'loops':2,'playing':True,'attempts':2,'downloadFailed':False,'url':'secret-url','originalCachePath':'secret-path'},
+            {'format':'secret-format','frames':'secret-data'}],'candidates':['secret-candidate']})
+        self.assertEqual(result['states'][0]['frames'],304)
+        self.assertEqual(result['states'][0]['loops'],2)
+        self.assertEqual(result['states'][0]['attempts'],2)
+        self.assertEqual(result['downloadInFlight'],4)
+        self.assertNotIn('secret',json.dumps(result))
+        self.assertIsNone(d.qt_summary({'engine':'other'}))
+
+    def test_qt_counts_without_media_metadata(self):
+        result=d.qt_summary({'engine':'qt6-live','active':2,'loops':8,'downloadInFlight':4,'states':[
+            {'album':True,'format':'webp','frames':304,'changes':609,'loops':2,'playing':True,'attempts':2,'downloadFailed':False,'url':'secret-url'},
+            {'format':'secret-format','frames':'secret-data'}],'candidates':['secret-candidate']})
+        self.assertEqual(result['states'][0]['frames'],304)
+        self.assertEqual(result['states'][0]['loops'],2)
+        self.assertEqual(result['states'][0]['attempts'],2)
+        self.assertEqual(result['downloadInFlight'],4)
+        self.assertNotIn('secret',json.dumps(result))
+        self.assertIsNone(d.qt_summary({'engine':'other'}))
+
     def test_event_log_rotates(self):
         log=d.STATE/'launcher-events.jsonl';log.write_text('x'*270000)
         d.event('rotation')

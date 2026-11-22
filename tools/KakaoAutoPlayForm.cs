@@ -190,6 +190,8 @@ internal class AutoPlayForm : Form
         var p=Read("bitmap-bridge-progress.json");
         var d=p.ContainsKey("originalDownloads")?p["originalDownloads"] as Dictionary<string,object>:null;
         if(running&&d!=null&&Value(d,"available","")=="False")detail.Text="저장된 움짤 재생 중 · 원본 자동 받기는 중단됐어요.";
+        if(running&&Value(p,"architecture","")=="x64")detail.Text="64비트 시험 연결 · 저장된 움짤 재생만 지원해요.";
+        if(running&&Value(p,"engine","")=="qt6-live")detail.Text="Qt 카톡 연결 · 사진 원본을 캐시에 받아 반복재생해요.";
         playing.Text=running?Value(p,"active","0")+"개":"—";
         downloads.Text=running&&d!=null?Value(d,"saved","0")+"개":"—";
         start.Enabled=!fresh||status=="stopped";stop.Enabled=fresh&&status!="stopped";

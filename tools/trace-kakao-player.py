@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import frida
 from kakao_download_startup import start_downloader
 from kakao_lifetime import owner_alive, manager_alive
-from kakao_install import x86_process
+from kakao_install import supported_process, machine
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--pid', type=int, required=True)
@@ -49,8 +49,12 @@ if args.source_gif:
     with args.source_gif.open('rb') as gif:
         if gif.read(6) not in (b'GIF87a', b'GIF89a'):
             parser.error('Source is not a GIF file')
-exe=x86_process(args.pid)
+exe=supported_process(args.pid)
 if exe is None:raise RuntimeError('실행 중인 카톡 경로를 확인하지 못했어요.')
+if exe.name.casefold()=='kakaotalkui.exe':
+    from kakao_qt_worker import run
+    raise SystemExit(run(args))
+target_arch='x64' if machine(exe)==0x8664 else 'ia32'
 if not args.bridge:raise RuntimeError('고정 내부 주소 추적 모드는 일반 배포에서 사용하지 않아요.')
 
 source = r'''
@@ -161,7 +165,9 @@ if args.auto_gifs:
     discovery = module.GifDiscovery(None if args.no_default_sources else args.catalog, directories)
 script = None
 download_script = None
-report = {'status': 'starting', 'pid': args.pid, 'events': []}
+report = {'status': 'starting', 'pid': args.pid, 'architecture': target_arch, 'events': []}
+if args.download_originals and target_arch=='x64':
+    report['originalDownloadsUnavailable']='x64-original-download-not-implemented'
 completed_originals = deque(maxlen=5000)
 def on_message(message, data):
     original = message.get('payload', {}).get('originalFile') if message.get('type') == 'send' else None
@@ -179,7 +185,7 @@ try:
     script = session.create_script(source, runtime='v8')
     script.on('message', on_message)
     script.load()
-    if args.download_originals:
+    if args.download_originals and target_arch=='ia32':
         import ctypes
         from ctypes import wintypes
         get_thread = ctypes.WinDLL('user32').GetWindowThreadProcessId

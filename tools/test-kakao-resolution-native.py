@@ -1,6 +1,7 @@
 """Exercise shipped Frida/GDI code only in our own hidden fixture, never Kakao."""
 import json, subprocess, sys, time
 from pathlib import Path
+ARCH='x64' if '--x64' in sys.argv else 'x86'
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'artifacts/kakao-internals/deps'))
 sys.path.insert(0,str(ROOT/'dist/codecs/deps'))
@@ -8,7 +9,7 @@ import frida
 from PIL import Image, ImageDraw
 work=ROOT/'artifacts/tests/resolution-playback';work.mkdir(parents=True,exist_ok=True)
 identity=work/'fixture.json';identity.unlink(missing_ok=True)
-process=subprocess.Popen([str(ROOT/'artifacts/tests/autoplay-agent-load/KakaoTalk.exe'),str(identity)],creationflags=0x08000000)
+process=subprocess.Popen([str(ROOT/('artifacts/tests/autoplay-agent-load'+('-x64' if ARCH=='x64' else '')+'/KakaoTalk.exe')),str(identity)],creationflags=0x08000000)
 session=None
 try:
     for _ in range(100):
@@ -20,12 +21,17 @@ try:
     code='const BRIDGE_CONFIG='+json.dumps({'hwnd':info['hwnd'],'managed':True})+';\n'+base+(ROOT/'tools/kakao-auto-bridge.js').read_text(encoding='utf-8-sig')
     code+='''
 rpc.exports.probefile=function(path){return open(path,image=>{
- const a=Memory.alloc(4),b=Memory.alloc(4);getWidth(image,a);const w=a.readU32();getHeight(image,b);const h=b.readU32();
+ const a=Memory.alloc(Process.pointerSize),b=Memory.alloc(Process.pointerSize);getWidth(image,a);const w=a.readU32();getHeight(image,b);const h=b.readU32();
  if(makeBitmap(image,a,0xffffffff)!==0)throw Error('fixture bitmap');const bitmap=a.readPointer();
  try{return match(bitmap,w,h);}finally{deleteObject(bitmap);}
 });};
+rpc.exports.frames=function(id){
+ const s=sources.get(id);if(!s||!s.frames)throw Error('Decoded frames missing: '+JSON.stringify(s&&s.report));
+ for(const f of s.frames){const b=Memory.alloc(BITMAP_SIZE);if(getObject(f.bitmap,BITMAP_SIZE,b)!==BITMAP_SIZE||b.add(4).readS32()!==s.w)throw Error('Invalid native frame');}
+ return {ends:s.frames.map(f=>f.end),duration:s.duration,arch:Process.arch};
+};
 rpc.exports.benchmark=function(path){return open(path,image=>{
- const out=Memory.alloc(4);getWidth(image,out);const w=out.readU32();getHeight(image,out);const h=out.readU32();
+ const out=Memory.alloc(Process.pointerSize);getWidth(image,out);const w=out.readU32();getHeight(image,out);const h=out.readU32();
  if(makeBitmap(image,out,0xffffffff)!==0)throw Error('fixture bitmap');const bitmap=out.readPointer(),started=Date.now();
  try{for(let i=0;i<100;i++)if(!match(bitmap,w,h))throw Error('benchmark match');return {iterations:100,milliseconds:Date.now()-started};}finally{deleteObject(bitmap);}
 });};
@@ -38,8 +44,11 @@ rpc.exports.benchmark=function(path){return open(path,image=>{
             im=Image.new('RGB',(200,200),'white');d=ImageDraw.Draw(im)
             d.rectangle((8,15,85,135),fill='red' if number==0 else 'green');d.ellipse((75,65,190,190),fill='blue' if number==0 else 'orange')
             d.line((0,180-frame*15,180,0),fill='black',width=7);frames.append(im)
-        gif=work/f'source-{number}.gif';frames[0].save(gif,save_all=True,append_images=frames[1:],duration=100,loop=0)
+        gif=work/f'source-{number}.gif';frames[0].save(gif,save_all=True,append_images=frames[1:],duration=[70,130],loop=0)
         assert api.registerfile(str(gif),f'fixture-{number}')['status']=='registered'
+        api.activate(f'fixture-{number}')
+        decoded=api.frames(f'fixture-{number}')
+        assert decoded['ends']==[70,200] and decoded['duration']==200,decoded
         with Image.open(gif) as original: first=original.convert('RGB')
         for size in [100,150,200,250,300,350,400,600,800]:
             for method in [Image.Resampling.NEAREST,Image.Resampling.BILINEAR,Image.Resampling.BICUBIC]:
@@ -61,6 +70,17 @@ rpc.exports.benchmark=function(path){return open(path,image=>{
             im=Image.new('RGBA',first.size,background);im.alpha_composite(first)
             png=work/f'transparent-{scale}-{background}.png';im.convert('RGB').resize((round(140*scale),round(200*scale)),Image.Resampling.BICUBIC).save(png)
             found=api.probefile(str(png));assert found=='transparent',(scale,background,found,api.snapshot()['comparisons'][-1:])
+    # Exercise the shipped animated WebP -> PNG -> native bitmap pipeline too.
+    import hashlib, importlib.util
+    spec=importlib.util.spec_from_file_location('webp_frames',ROOT/'tools/kakao-webp-frames.py')
+    webp_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(webp_module)
+    webp=work/'source.webp';frames[0].save(webp,save_all=True,append_images=frames[1:],duration=[80,120],loop=0,lossless=True)
+    key=hashlib.sha256(webp.read_bytes()).hexdigest()
+    media=webp_module.MediaSources(api,work/'webp-cache')
+    assert media.registerfile(str(webp.resolve()),key)['status']=='registered'
+    media.activate(key);decoded=api.frames(key)
+    assert decoded['ends']==[80,200] and decoded['duration']==200,decoded
+    media.unregister(key)
     benchmark=api.benchmark(str(work/'preview-0-800-3.png'))
     # Identical first frames from separate animations are ambiguous; never
     # choose an arbitrary ID based on registration order or a stale cache.

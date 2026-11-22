@@ -1,6 +1,7 @@
 """Real Win32 controls in an offscreen, nonactivating owned fixture only."""
 import json,subprocess,sys,time,os
 from pathlib import Path
+ARCH='x64' if '--x64' in sys.argv else 'x86'
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'artifacts/kakao-internals/deps'))
 import frida
@@ -17,11 +18,11 @@ var view=CreateWindowEx(0,"STATIC","",0x50000000,0,0,420,400,root,IntPtr.Zero,In
 var editor=CreateWindowEx(0,"RICHEDIT50W","",0x50000000,0,400,420,160,root,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
 var send=CreateWindowEx(0,"BUTTON","fixture",0x50000000,300,560,100,30,root,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero);
 if(root==IntPtr.Zero||editor==IntPtr.Zero)throw new Exception("Fixture HWND");
-File.WriteAllText(args[0],"{\"pid\":"+Process.GetCurrentProcess().Id+",\"hwnd\":"+root.ToInt32()+",\"editor\":"+editor.ToInt32()+",\"send\":"+send.ToInt32()+"}");
+File.WriteAllText(args[0],"{\"pid\":"+Process.GetCurrentProcess().Id+",\"hwnd\":"+root.ToInt64()+",\"editor\":"+editor.ToInt64()+",\"send\":"+send.ToInt64()+"}");
 var timer=new Timer{Interval=60000};timer.Tick+=(s,e)=>Application.Exit();timer.Start();Application.Run();}
 }
 ''',encoding='utf8')
-subprocess.run([str(Path(os.environ['WINDIR'])/'Microsoft.NET/Framework/v4.0.30319/csc.exe'),'/nologo','/target:winexe','/platform:x86','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/out:'+str(exe),str(source)],check=True)
+subprocess.run([str(Path(os.environ['WINDIR'])/'Microsoft.NET/Framework/v4.0.30319/csc.exe'),'/nologo','/target:winexe','/platform:'+ARCH,'/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/out:'+str(exe),str(source)],check=True)
 process=subprocess.Popen([str(exe),str(identity)],creationflags=0x08000000);session=None
 try:
     for _ in range(100):

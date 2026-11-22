@@ -38,10 +38,24 @@ jobs:
           if ($LASTEXITCODE) { throw 'Startup migration test failed' }
           node tools/test-kakao-resolution.cjs
           if ($LASTEXITCODE) { throw 'Rendering test failed' }
+          foreach ($test in @('test-kakao-install.py','test-kakao-diagnostics.py','test-kakao-autoplay-service.py','test-kakao-lifetime.py','test-kakao-download-startup.py')) {
+            python "tools/$test"
+            if ($LASTEXITCODE) { throw "$test failed" }
+          }
+          node tools/test-kakao-qt.cjs
+          if ($LASTEXITCODE) { throw 'Qt playback test failed' }
+          node tools/test-kakao-download-pump.cjs
+          if ($LASTEXITCODE) { throw 'Download queue test failed' }
+          python tools/test-kakao-resolution-native.py
+          if ($LASTEXITCODE) { throw 'Native x86 rendering test failed' }
+          python tools/test-kakao-resolution-native.py --x64
+          if ($LASTEXITCODE) { throw 'Native x64 rendering test failed' }
       - name: Build executable
         shell: pwsh
         run: |
           ./tools/build-kakao-exe.ps1 -Name KakaoAutoPlay -PythonPath (Get-Command python).Source
+          $test = Start-Process artifacts/KakaoAutoPlay.exe -ArgumentList '--self-test',"$PWD/artifacts/release-selftest" -PassThru -Wait -WindowStyle Hidden
+          if ($test.ExitCode) { throw 'Packaged runtime self-test failed' }
           $hash = (Get-FileHash artifacts/KakaoAutoPlay.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  KakaoAutoPlay.exe" | Set-Content artifacts/SHA256SUMS.txt
       - name: Publish release
@@ -50,7 +64,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          gh release create $env:RELEASE_TAG artifacts/KakaoAutoPlay.exe artifacts/SHA256SUMS.txt --verify-tag --draft --title "Kakao AutoPlay $env:RELEASE_TAG" --generate-notes
+          gh release create $env:RELEASE_TAG artifacts/KakaoAutoPlay.exe artifacts/SHA256SUMS.txt --verify-tag --draft --title "Kakao AutoPlay $env:RELEASE_TAG" --notes-file "docs/releases/$env:RELEASE_TAG.md"
           if ($LASTEXITCODE) { throw 'Release upload failed' }
           gh release edit $env:RELEASE_TAG --draft=false --latest
           if ($LASTEXITCODE) { throw 'Release publication failed' }

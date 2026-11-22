@@ -1,12 +1,17 @@
 // Experimental, bounded in-process rendering bridge for the inspected GIF.
-// The Python launcher checks the executable hash. No executable files are changed.
+// The launcher validates the target process and architecture. No executable files are changed.
 'use strict';
 const app = Process.getModuleByName('KakaoTalk.exe');
-if (Process.arch !== 'ia32') throw Error('Requires inspected x86 build');
+if (!['ia32','x64'].includes(Process.arch)) throw Error('Unsupported architecture');
+const WIN_ABI=Process.pointerSize===8?'win64':'stdcall';
+const BITMAP_DATA_SIZE=16+2*Process.pointerSize;
+const BITMAP_SIZE=Process.pointerSize===8?32:24;
+const PROPERTY_VALUE_OFFSET=Process.pointerSize===8?16:12;
+const PROPERTY_SIZE=PROPERTY_VALUE_OFFSET+Process.pointerSize;
 const gdip = Process.getModuleByName('gdiplus.dll');
 const gdi = Process.getModuleByName('gdi32.dll');
 const user = Process.getModuleByName('user32.dll');
-const fn = (m,n,r,a) => new NativeFunction(m.getExportByName(n),r,a,'stdcall');
+const fn = (m,n,r,a) => new NativeFunction(m.getExportByName(n),r,a,WIN_ABI);
 const getWidth=fn(gdip,'GdipGetImageWidth','int',['pointer','pointer']);
 const getHeight=fn(gdip,'GdipGetImageHeight','int',['pointer','pointer']);
 const loadFile=fn(gdip,'GdipLoadImageFromFile','int',['pointer','pointer']);
@@ -34,7 +39,7 @@ const redraw=fn(user,'RedrawWindow','int',['pointer','pointer','pointer','uint']
 const windowPid=fn(user,'GetWindowThreadProcessId','uint',['pointer','pointer']);
 const isIconic=fn(user,'IsIconic','int',['pointer']);
 const isVisible=fn(user,'IsWindowVisible','int',['pointer']);
-const hwnd=ptr(BRIDGE_CONFIG.hwnd), pidOut=Memory.alloc(4);
+const hwnd=ptr(BRIDGE_CONFIG.hwnd), pidOut=Memory.alloc(Process.pointerSize);
 const uiThread=windowPid(hwnd,pidOut);
 if (!uiThread || pidOut.readU32()!==Process.id) throw Error('Test chat window changed');
 const listeners=[], frames=[], cache=new Map();
@@ -44,7 +49,7 @@ let busy=false, stopped=false, cleaned=false, baseline=null, started=0, duration
 let imageWidth=0,imageHeight=0,lastMatch=0;
 function pixels(image) {
   const rect=Memory.alloc(16);rect.writeS32(0);rect.add(4).writeS32(0);rect.add(8).writeS32(imageWidth);rect.add(12).writeS32(imageHeight);
-  const data=Memory.alloc(24);
+  const data=Memory.alloc(BITMAP_DATA_SIZE);
   if(lock(image,rect,1,0x26200a,data)!==0) return null;
   try {
     const stride=data.add(8).readS32(), scan=data.add(16).readPointer();
@@ -58,7 +63,7 @@ function pixels(image) {
   } finally {unlock(image,data);}
 }
 function capture(image) {
-  const n=Memory.alloc(4),w=Memory.alloc(4),h=Memory.alloc(4);
+  const n=Memory.alloc(Process.pointerSize),w=Memory.alloc(Process.pointerSize),h=Memory.alloc(Process.pointerSize);
   // GUID from the installed Windows SDK gdiplusimaging.h (ImageFormatGIF).
   const format=Memory.alloc(16);
   if(rawFormat(image,format)!==0 || Array.from(new Uint8Array(format.readByteArray(16))).join(',')!=='176,60,107,185,40,7,211,17,157,123,0,0,248,30,243,46')return false;
@@ -72,15 +77,15 @@ function capture(image) {
     stats.rejected='Source exceeds dimension/frame/memory budget';return false;
   }
   imageWidth=width;imageHeight=height;
-  const out=Memory.alloc(4);
+  const out=Memory.alloc(Process.pointerSize);
   if(clone(image,out)!==0) throw Error('Could not clone source GIF');
   const copy=out.readPointer();
   try {
     const delays=Array(count).fill(100);
-    if(getPropertySize(copy,0x5100,n)===0 && n.readU32()>=16+count*4 && n.readU32()<4096) {
+    if(getPropertySize(copy,0x5100,n)===0 && n.readU32()>=PROPERTY_SIZE+count*4 && n.readU32()<4096) {
       const size=n.readU32(), prop=Memory.alloc(size);
       if(getProperty(copy,0x5100,size,prop)===0 && prop.add(4).readU32()>=count*4 && prop.add(8).readU16()===4) {
-        const values=prop.add(12).readPointer();
+        const values=prop.add(PROPERTY_VALUE_OFFSET).readPointer();
         if(values.compare(prop)<0 || values.add(count*4).compare(prop.add(size))>0) throw Error('Invalid delay property bounds');
         for(let i=0;i<count;i++) delays[i]=Math.max(20,Math.min(60000,values.add(i*4).readU32()*10));
       }
@@ -112,10 +117,10 @@ listeners.push(Interceptor.attach(gdip.getExportByName('GdipImageSelectActiveFra
 }));
 function match(bitmap) {
   const key=bitmap.toString();if(cache.has(key))return cache.get(key);
-  const info=Memory.alloc(24);
-  if(!getObject(bitmap,24,info) || info.add(4).readS32()!==imageWidth || Math.abs(info.add(8).readS32())!==imageHeight)return false;
+  const info=Memory.alloc(BITMAP_SIZE);
+  if(!getObject(bitmap,BITMAP_SIZE,info) || info.add(4).readS32()!==imageWidth || Math.abs(info.add(8).readS32())!==imageHeight)return false;
   stats.candidates++;
-  const out=Memory.alloc(4);let yes=false;
+  const out=Memory.alloc(Process.pointerSize);let yes=false;
   if(fromBitmap(bitmap,ptr(0),out)===0) {
     const image=out.readPointer();
     try{
@@ -150,8 +155,8 @@ for(const [owner,name] of [[gdi,'BitBlt'],[gdi,'StretchBlt'],[Process.findModule
     busy=true;
     try{
       const bitmap=currentObject(args[5],7);
-      const info=Memory.alloc(24);
-      if(!bitmap.isNull() && getObject(bitmap,24,info)) {
+      const info=Memory.alloc(BITMAP_SIZE);
+      if(!bitmap.isNull() && getObject(bitmap,BITMAP_SIZE,info)) {
         const key=[name,this.returnAddress.sub(app.base),args[3].toInt32(),args[4].toInt32(),info.add(4).readS32(),info.add(8).readS32(),args[6].toInt32(),args[7].toInt32()].join(':');
         if(Object.keys(stats.draws).length<120 || stats.draws[key])stats.draws[key]=(stats.draws[key]||0)+1;
       }
@@ -193,7 +198,7 @@ rpc.exports={snapshot(){return stats;},stop(){
 }};
 if(BRIDGE_CONFIG.sourceFile) {
   busy=true;
-  const out=Memory.alloc(4);
+  const out=Memory.alloc(Process.pointerSize);
   try {
     const status=loadFile(Memory.allocUtf16String(BRIDGE_CONFIG.sourceFile),out);
     if(status!==0)throw Error('GIF load failed: '+status);

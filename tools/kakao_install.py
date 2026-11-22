@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 import struct
 
+KAKAO_NAMES = ('kakaotalk.exe', 'kakaotalkui.exe')
+
 
 def process_path(pid):
     kernel=c.WinDLL('kernel32',use_last_error=True)
@@ -27,7 +29,7 @@ def running_paths():
     found=[]
     for pid in array[:min(len(array),needed.value//c.sizeof(w.DWORD))]:
         path=process_path(pid)
-        if path and path.name.casefold()=='kakaotalk.exe':found.append(path)
+        if path and path.name.casefold() in KAKAO_NAMES:found.append(path)
     return found
 
 
@@ -60,13 +62,16 @@ def candidates(running=None,registered=None,environ=None):
     raw=list(running_paths() if running is None else running)+list(registry_paths() if registered is None else registered)
     for variable in ('ProgramFiles(x86)','ProgramFiles','LOCALAPPDATA'):
         if env.get(variable):raw.extend([Path(env[variable])/'Kakao/KakaoTalk/KakaoTalk.exe',Path(env[variable])/'KakaoTalk/KakaoTalk.exe'])
+    if env.get('LOCALAPPDATA'):raw.append(Path(env['LOCALAPPDATA'])/'Programs/Kakao/KakaoTalk/bin/KakaoTalkUI.exe')
     for value in raw:
         if not value:continue
         text=os.path.expandvars(str(value)).strip();quoted=re.match(r'^"([^"]+)"(?:\s*,\s*-?\d+)?$',text)
         text=quoted.group(1) if quoted else re.sub(r',\s*-?\d+$','',text)
         path=Path(text)
-        if path.suffix.casefold()!='.exe':path=path/'KakaoTalk.exe'
-        if path.name.casefold()!='kakaotalk.exe':continue
+        if path.suffix.casefold()!='.exe':
+            qt=path/'bin/KakaoTalkUI.exe'
+            path=qt if qt.is_file() else path/'KakaoTalk.exe'
+        if path.name.casefold() not in KAKAO_NAMES:continue
         identity=os.path.normcase(str(path.absolute()))
         if identity not in seen:seen.add(identity);yield path
 
@@ -89,8 +94,15 @@ def discover(**kwargs):
     return None
 
 
-def x86_process(pid):
+def supported_process(pid):
     path=process_path(pid)
-    if path is None or path.name.casefold()!='kakaotalk.exe':return None
-    if machine(path)!=0x14c:raise RuntimeError('현재 자동재생 엔진은 32비트 카톡만 연결할 수 있어요. 64비트 연결은 아직 지원하지 않아요.')
+    if path is None or path.name.casefold() not in KAKAO_NAMES:return None
+    if machine(path) not in (0x14c,0x8664):raise RuntimeError('x86 또는 x64 카톡만 연결할 수 있어요.')
+    return path
+
+
+def x86_process(pid):
+    """Legacy callers must still reject non-x86 internal layouts."""
+    path=supported_process(pid)
+    if path is not None and machine(path)!=0x14c:raise RuntimeError("This operation requires x86 KakaoTalk")
     return path

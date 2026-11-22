@@ -2,7 +2,8 @@ import tempfile
 from pathlib import Path
 import struct
 import unittest
-from kakao_install import candidates, discover, machine
+from unittest.mock import patch
+from kakao_install import candidates, discover, machine, supported_process, x86_process
 
 
 class InstallTests(unittest.TestCase):
@@ -27,6 +28,22 @@ class InstallTests(unittest.TestCase):
         bad=self.exe('bad');bad.write_bytes(b'not a PE');good=self.exe('good');self.assertEqual(discover(running=[bad],registered=[good],environ={}),good)
     def test_dedup_and_architecture(self):
         path=self.exe('64bit',0x8664);self.assertEqual(machine(path),0x8664);self.assertEqual(list(candidates(running=[path],registered=[path],environ={})),[path])
+    def test_x64_renderer_admitted_but_legacy_internal_caller_rejected(self):
+        path=self.exe('64bit',0x8664)
+        with patch('kakao_install.process_path',return_value=path):
+            self.assertEqual(supported_process(123),path)
+            with self.assertRaises(RuntimeError):x86_process(123)
+    def test_qt_local_install_and_registered_directory(self):
+        old=self.exe('local/Programs/Kakao/KakaoTalk/bin',0x8664)
+        path=old.with_name('KakaoTalkUI.exe');old.rename(path)
+        self.assertEqual(discover(running=[],registered=[],environ={'LOCALAPPDATA':str(self.root/'local')}),path)
+        self.assertEqual(discover(running=[],registered=[path.parent.parent],environ={}),path)
+        with patch('kakao_install.process_path',return_value=path):self.assertEqual(supported_process(123),path)
+
+    def test_arm64_rejected(self):
+        path=self.exe('arm64',0xaa64)
+        with patch('kakao_install.process_path',return_value=path):
+            with self.assertRaises(RuntimeError):supported_process(123)
 
 
 if __name__=='__main__':unittest.main()

@@ -1,6 +1,6 @@
 // Included after the native GDI bindings from kakao-bitmap-bridge.js.
 // Source indexing is separate from decoded frame residency.
-const hwnd=ptr(BRIDGE_CONFIG.hwnd),pidOut=Memory.alloc(4);
+const hwnd=ptr(BRIDGE_CONFIG.hwnd),pidOut=Memory.alloc(Process.pointerSize);
 const uiThread=windowPid(hwnd,pidOut);
 let watchedWindows=[hwnd];
 if(!uiThread || pidOut.readU32()!==Process.id)throw Error('Chat window changed');
@@ -35,7 +35,7 @@ function refreshConversation(root){
       if(++visited>128){overflow=true;return 0;}if(!isVisible(window))return 1;
       const rect=clientInRoot(window,root);if(!rect)return 1;
       refreshClass(window,name,128);children.push({window,rect,cls:name.readUtf16String()});return 1;
-    },'int',['pointer','pointer'],'stdcall');
+    },'int',['pointer','pointer'],WIN_ABI);
     refreshChildren(root,visit,ptr(0));
     const cutoff=overflow?null:conversationCutoff(client.right,client.bottom,children);
     if(cutoff===null||cutoff<=0){stats.refreshSkipped++;return;}
@@ -49,6 +49,7 @@ function refreshConversation(root){
     }
   }catch(_){stats.refreshSkipped++;}
 }
+stats.architecture=Process.arch;stats.pointerSize=Process.pointerSize;
 stats.performancePatch='4k-perf-v1';stats.maxRefreshFps=1000/MIN_REFRESH_MS;
 stats.performance={calls:0,matchMs:0,fromBitmapMs:0,normalizeMs:0,chooseMs:0};
 // PERF_NATIVE_BEGIN: arrays passed to these helpers are immutable snapshots.
@@ -88,7 +89,7 @@ function same(a,b){return a.length===b.length&&equalBytes(nativeBytes(a),nativeB
 const imageThumbnail=fn(gdip,'GdipGetImageThumbnail','int',['pointer','uint','uint','pointer','pointer','pointer']);
 let refBytes=0,decodedBytes=0,busy=false,stopped=false,cleaned=false,timer=null;
 function pixels(image,w,h){
-  const rect=Memory.alloc(16),data=Memory.alloc(24);
+  const rect=Memory.alloc(16),data=Memory.alloc(BITMAP_DATA_SIZE);
   rect.writeS32(0);rect.add(4).writeS32(0);rect.add(8).writeS32(w);rect.add(12).writeS32(h);
   if(lock(image,rect,1,0x26200a,data)!==0)throw Error('Pixel lock failed');
   try{
@@ -98,11 +99,11 @@ function pixels(image,w,h){
   }finally{unlock(image,data);}
 }
 function normalizedPixels(image,variants=false){
-  const out=Memory.alloc(4);if(imageThumbnail(image,SIGNATURE_SIZE,SIGNATURE_SIZE,out,ptr(0),ptr(0))!==0)throw Error('Thumbnail normalization failed');
+  const out=Memory.alloc(Process.pointerSize);if(imageThumbnail(image,SIGNATURE_SIZE,SIGNATURE_SIZE,out,ptr(0),ptr(0))!==0)throw Error('Thumbnail normalization failed');
   const thumb=out.readPointer();
   try{
     if(!variants)return [pixels(thumb,SIGNATURE_SIZE,SIGNATURE_SIZE)];
-    const rect=Memory.alloc(16),data=Memory.alloc(24),size=SIGNATURE_SIZE;
+    const rect=Memory.alloc(16),data=Memory.alloc(BITMAP_DATA_SIZE),size=SIGNATURE_SIZE;
     rect.writeS32(0);rect.add(4).writeS32(0);rect.add(8).writeS32(size);rect.add(12).writeS32(size);
     if(lock(thumb,rect,1,0x26200a,data)!==0)throw Error('Signature pixel lock failed');
     try{
@@ -133,7 +134,7 @@ function coarsePixels(bytes,w,h){
   return sums;
 }
 function describe(image){
-  const out=Memory.alloc(4),guid=Memory.alloc(16),fmt=Memory.alloc(16);
+  const out=Memory.alloc(Process.pointerSize),guid=Memory.alloc(16),fmt=Memory.alloc(16);
   if(rawFormat(image,fmt)!==0 || fmt.readU32()!==0xb96b3cb0)return null;
   if(getWidth(image,out)!==0)return null;const w=out.readU32();
   if(getHeight(image,out)!==0)return null;const h=out.readU32();
@@ -143,7 +144,7 @@ function describe(image){
   return {w,h,n,guid};
 }
 function open(path,action){
-  const out=Memory.alloc(4),status=loadFile(Memory.allocUtf16String(path),out);
+  const out=Memory.alloc(Process.pointerSize),status=loadFile(Memory.allocUtf16String(path),out);
   if(status!==0)throw Error('Image load failed: '+status);
   const image=out.readPointer();try{return action(image);}finally{dispose(image);}
 }
@@ -165,7 +166,7 @@ function register(path,id,external=null){
   try{return open(path,image=>{
     let d=describe(image);
     if(external){
-      const out=Memory.alloc(4);getWidth(image,out);const w=out.readU32();getHeight(image,out);const h=out.readU32();
+      const out=Memory.alloc(Process.pointerSize);getWidth(image,out);const w=out.readU32();getHeight(image,out);const h=out.readU32();
       d={w,h,n:external.frames};
       if(w<9||h<9||w>1024||h>1024||d.n<2||d.n>900||w*h*d.n*4>64*1024*1024)d=null;
     }
@@ -183,6 +184,7 @@ function register(path,id,external=null){
 function activate(id,pack=null){
   const s=sources.get(id);pending.delete(id);if(!s||s.frames)return;
   if(s.external&&!pack)return;
+  s.lastSeen=Date.now();
   const cost=s.w*s.h*s.n*(s.external?4:8);
   for(const old of [...sources.values()].filter(x=>x.frames&&Date.now()-x.lastSeen>3000).sort((a,b)=>a.lastSeen-b.lastSeen)){
     if(decodedBytes+cost<=MAX_DECODED&&stats.active<8)break;release(old);
@@ -192,7 +194,7 @@ function activate(id,pack=null){
   try{
     if(s.external){
       if(pack.paths.length!==s.n||pack.delays.length!==s.n)throw Error('Frame pack mismatch');
-      const out=Memory.alloc(4);let duration=0;
+      const out=Memory.alloc(Process.pointerSize);let duration=0;
       for(let i=0;i<s.n;i++)open(pack.paths[i],image=>{
         getWidth(image,out);if(out.readU32()!==s.w)throw Error('Frame width mismatch');
         getHeight(image,out);if(out.readU32()!==s.h)throw Error('Frame height mismatch');
@@ -201,7 +203,7 @@ function activate(id,pack=null){
         const bitmap=out.readPointer(),dc=createDC(ptr(0));
         if(dc.isNull()){deleteObject(bitmap);throw Error('DC allocation failed');}
         const old=selectObject(dc,bitmap);
-        if(old.isNull()||old.equals(ptr('0xffffffff'))){deleteDC(dc);deleteObject(bitmap);throw Error('DC selection failed');}
+        if(old.isNull()||old.equals(ptr(-1))){deleteDC(dc);deleteObject(bitmap);throw Error('DC selection failed');}
         if(!Number.isFinite(pack.delays[i])||pack.delays[i]<20||pack.delays[i]>600000000)throw Error('Invalid frame delay');
         built.push({bitmap,dc,old,end:duration+=pack.delays[i]});
       });
@@ -209,11 +211,11 @@ function activate(id,pack=null){
     }else open(s.path,image=>{
     const d=describe(image);if(!d||d.w!==s.w||d.h!==s.h||d.n!==s.n)throw Error('Source changed');
     if(selectFrame(image,d.guid,0)!==0||!same(normalizedPixels(image)[0],s.ref))throw Error('Source pixels changed');
-    const out=Memory.alloc(4),delays=Array(s.n).fill(100);
-    if(getPropertySize(image,0x5100,out)===0&&out.readU32()>=16+s.n*4&&out.readU32()<4096){
+    const out=Memory.alloc(Process.pointerSize),delays=Array(s.n).fill(100);
+    if(getPropertySize(image,0x5100,out)===0&&out.readU32()>=PROPERTY_SIZE+s.n*4&&out.readU32()<4096){
       const size=out.readU32(),prop=Memory.alloc(size);
       if(getProperty(image,0x5100,size,prop)===0&&prop.add(8).readU16()===4&&prop.add(4).readU32()>=s.n*4){
-        const values=prop.add(12).readPointer();
+        const values=prop.add(PROPERTY_VALUE_OFFSET).readPointer();
         if(values.compare(prop)<0||values.add(s.n*4).compare(prop.add(size))>0)throw Error('Invalid delay bounds');
         for(let i=0;i<s.n;i++)delays[i]=Math.max(20,Math.min(60000,values.add(i*4).readU32()*10));
       }
@@ -224,7 +226,7 @@ function activate(id,pack=null){
       const bitmap=out.readPointer(),dc=createDC(ptr(0));
       if(dc.isNull()){deleteObject(bitmap);throw Error('DC allocation failed');}
       const old=selectObject(dc,bitmap);
-      if(old.isNull()||old.equals(ptr('0xffffffff'))){deleteDC(dc);deleteObject(bitmap);throw Error('DC selection failed');}
+      if(old.isNull()||old.equals(ptr(-1))){deleteDC(dc);deleteObject(bitmap);throw Error('DC selection failed');}
       built.push({bitmap,dc,old,end:duration+=delays[i]});
     }
     s.duration=duration;
@@ -269,7 +271,7 @@ function match(bitmap,w,h){
   try{
   const key=bitmap.toString();
   if(![...sources.values()].some(s=>compatibleAspect(w,h,s.w,s.h)))return null;
-  const out=Memory.alloc(4);let found=null;
+  const out=Memory.alloc(Process.pointerSize);let found=null;
   const fromStarted=Date.now(),fromResult=fromBitmap(bitmap,ptr(0),out);
   stats.performance.fromBitmapMs+=Date.now()-fromStarted;
   if(fromResult===0){
@@ -290,8 +292,8 @@ listeners.push(Interceptor.attach(blend,{onEnter(args){
   if(busy||stopped||this.threadId!==uiThread||(this.returnAddress.compare(app.base)<0||this.returnAddress.compare(app.base.add(app.size))>=0))return;
   busy=true;
   try{
-    const bitmap=currentObject(args[5],7),info=Memory.alloc(24);
-    if(bitmap.isNull()||!getObject(bitmap,24,info))return;
+    const bitmap=currentObject(args[5],7),info=Memory.alloc(BITMAP_SIZE);
+    if(bitmap.isNull()||!getObject(bitmap,BITMAP_SIZE,info))return;
     const w=info.add(4).readS32(),h=Math.abs(info.add(8).readS32());
     const size=w+'x'+h;if(Object.keys(stats.sizes).length<100||stats.sizes[size])stats.sizes[size]=(stats.sizes[size]||0)+1;
     const x=args[6].toInt32(),y=args[7].toInt32(),width=args[8].toInt32(),height=args[9].toInt32();
@@ -313,7 +315,7 @@ const kernel=Process.getModuleByName('kernelbase.dll');
 listeners.push(Interceptor.attach(kernel.getExportByName('CreateFileW'),{onEnter(args){
   this.gif=null;if(busy||stopped)return;
   try{const path=args[0].readUtf16String();if(path&&path.length<1024&&/\.(gif|webp)$/i.test(path))this.gif=path;}catch(_){}
-},onLeave(result){if(this.gif&&!result.equals(ptr('0xffffffff'))&&observed.size<256)observed.add(this.gif);}}));
+},onLeave(result){if(this.gif&&!result.equals(ptr(-1))&&observed.size<256)observed.add(this.gif);}}));
 function tick(){
   if(stopped)return;
   watchedWindows=watchedWindows.filter(w=>windowPid(w,pidOut)===uiThread&&pidOut.readU32()===Process.id);

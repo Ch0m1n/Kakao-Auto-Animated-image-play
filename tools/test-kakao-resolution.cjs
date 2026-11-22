@@ -35,7 +35,7 @@ assert.ok(source.includes('cache.size>=MAX_MATCH_CACHE'));
 // Same HBITMAP may be repainted/reused without DeleteObject. Validate content,
 // including a previous negative result, before serving a cached match.
 const matchCode=source.slice(source.indexOf('function match('),source.indexOf('\nconst blend='));
-const cacheContext={cache:new Map(),sources:new Map([['one',{w:200,h:200}]]),MAX_MATCH_CACHE:128,
+const cacheContext={Process:{pointerSize:8},cache:new Map(),sources:new Map([['one',{w:200,h:200}]]),MAX_MATCH_CACHE:128,
   stats:{performance:{calls:0,matchMs:0,fromBitmapMs:0,normalizeMs:0,chooseMs:0}},
   compatibleAspect:context.compatibleAspect,same:context.same,Memory:{alloc:()=>({readPointer:()=>1})},ptr:()=>0,
   fromBitmap:()=>0,dispose:()=>{},normalizedPixels:()=>[cacheContext.content],
@@ -50,7 +50,7 @@ assert.equal(cacheContext.cache.size,128);
 // map the source crop but preserve every destination and blend argument.
 const p=n=>({toInt32:()=>n,toString:()=>String(n),isNull:()=>false});
 let callback;
-const drawContext={busy:false,stopped:false,uiThread:42,app:{base:{add:n=>n}},
+const drawContext={BITMAP_SIZE:32,busy:false,stopped:false,uiThread:42,app:{base:{add:n=>n}},
   stats:{sizes:{},replacements:0,errors:[]},Memory:{alloc:()=>({add:offset=>({readS32:()=>offset===4?400:600})})},
   currentObject:()=>p(1),getObject:()=>true,mapSourceRect:context.mapSourceRect,match:()=> 'one',ptr:p,
   sources:new Map([['one',{w:200,h:300,frames:[{dc:p(99),end:1000}],started:Date.now(),duration:1000,lastCycle:0,report:{loops:0,replacements:0,frameUse:{}}}]]),

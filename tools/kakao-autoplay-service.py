@@ -13,7 +13,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kakao_diagnostics import event, worker_failure
 from kakao_lifetime import owner_alive, creation_time
-from kakao_install import machine
+from kakao_install import machine, KAKAO_NAMES
 
 ROOT = Path(__file__).resolve().parents[1]
 STATE = ROOT / 'artifacts/kakao-internals'
@@ -69,10 +69,10 @@ class Windows:
             size = w.DWORD(len(path))
             if not self.k.QueryFullProcessImageNameW(handle, 0, path, c.byref(size)):
                 return None
-            if Path(path.value).name.casefold()!='kakaotalk.exe':
+            if Path(path.value).name.casefold() not in KAKAO_NAMES:
                 return None
-            if machine(Path(path.value))!=0x14c:
-                self.connection_error='64비트 카톡 연결은 아직 지원하지 않아요. 현재 엔진은 32비트용이에요.'
+            if machine(Path(path.value)) not in (0x14c,0x8664):
+                self.connection_error='x86 또는 x64 카톡만 연결할 수 있어요.'
                 return None
             times = [w.FILETIME() for _ in range(4)]
             if not self.k.GetProcessTimes(handle, *[c.byref(t) for t in times]):
@@ -86,7 +86,9 @@ class Windows:
         groups, alive, processes = {}, set(), {}
 
         def visit(hwnd, _):
-            if self.classname(hwnd) != 'EVA_Window_Dblclk':
+            cls=self.classname(hwnd)
+            qt=cls.startswith('Qt') and 'QWindow' in cls
+            if cls != 'EVA_Window_Dblclk' and not qt:
                 return True
             pid = w.DWORD()
             thread = self.u.GetWindowThreadProcessId(hwnd, c.byref(pid))
@@ -104,7 +106,7 @@ class Windows:
                 return True
 
             self.u.EnumChildWindows(hwnd, self.callback(child), 0)
-            if rich:
+            if rich or qt:
                 groups.setdefault((pid.value, created, thread), []).append(int(hwnd))
             return True
 

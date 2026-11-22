@@ -111,6 +111,17 @@ def rendering_summary(progress):
             'windowDpi': sorted({d for d in dpis if isinstance(d, int) and not isinstance(d, bool) and 48 <= d <= 768})[:16],
             'revision': revision}
 
+def qt_summary(progress):
+    if progress.get('engine') != 'qt6-live':return None
+    def number(value):return value if isinstance(value,(int,float)) and not isinstance(value,bool) and 0<=value<1e15 else None
+    rows=progress.get('states',[])
+    return {'engine':'qt6-live',**{k:number(progress.get(k)) for k in ('active','created','frameChanges','loops','scanMs','scanned','downloadPending','downloadInFlight')},
+            'states':[{'album':row.get('album') is True,'playing':row.get('playing') is True,
+                       'format':row.get('format') if row.get('format') in ('gif','webp') else None,
+                       **{k:number(row.get(k)) for k in ('frames','changes','loops','originalStatus','downloadStatus','attempts')},'downloadFailed':row.get('downloadFailed') is True}
+                      for row in (rows if isinstance(rows,list) else [])[:8] if isinstance(row,dict)]}
+
+
 def export(destination=None):
     STATE.mkdir(parents=True, exist_ok=True)
     target = Path(destination) if destination else STATE/('KakaoAutoPlay-diagnostics-'+time.strftime('%Y%m%d-%H%M%S')+'.zip')
@@ -129,7 +140,9 @@ def export(destination=None):
         'workerFailure':read_json('last-worker-failure.json') or worker_failure(read_json('bitmap-bridge.json')),
         'playback':{k:progress.get(k) for k in ['rendererVersion','refreshPolicy','refreshRequests','refreshSkipped','registered','active','maxActive','matches','ambiguous','matchErrors','pendingActivation','failedSources','croppedDraws','sourceRectMismatch','replacements','errors','rejected','decodedBytes']},
         'rendering':rendering_summary(progress),
+        'qt':qt_summary(progress),
         'performance':{
+            'architecture':progress.get('architecture') if progress.get('architecture') in ('ia32','x64') else None,
             'patch':progress.get('performancePatch') if progress.get('performancePatch')=='4k-perf-v1' else None,
             'maxRefreshFps':progress.get('maxRefreshFps'),
             **{key:value for key,value in progress.get('performance',{}).items()

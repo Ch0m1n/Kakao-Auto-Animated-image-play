@@ -10,9 +10,12 @@ New-Item -ItemType Directory -Force $frida,$pillow | Out-Null
 if ($LASTEXITCODE) { throw 'Frida dependency installation failed' }
 & $PythonPath -m pip install --target $pillow 'pillow==13.0.0'
 if ($LASTEXITCODE) { throw 'Pillow dependency installation failed' }
-$fixture = Join-Path $root 'artifacts/tests/autoplay-agent-load'
-New-Item -ItemType Directory -Force $fixture | Out-Null
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework/v4.0.30319/csc.exe'
-& $compiler /nologo /target:winexe /platform:x86 /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "/out:$fixture\KakaoTalk.exe" (Join-Path $root 'tests/Fixture.cs')
-if ($LASTEXITCODE) { throw 'Native test fixture build failed' }
-Write-Output 'Development dependencies and isolated x86 fixture are ready.'
+foreach ($arch in @('x86','x64')) {
+    $suffix = if ($arch -eq 'x64') { '-x64' } else { '' }
+    $fixture = Join-Path $root ('artifacts/tests/autoplay-agent-load'+$suffix)
+    New-Item -ItemType Directory -Force $fixture | Out-Null
+    & $compiler /nologo /target:winexe "/platform:$arch" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "/out:$fixture\KakaoTalk.exe" (Join-Path $root 'tests/Fixture.cs')
+    if ($LASTEXITCODE) { throw 'Native test fixture build failed' }
+}
+Write-Output 'Development dependencies and isolated x86/x64 fixtures are ready.'

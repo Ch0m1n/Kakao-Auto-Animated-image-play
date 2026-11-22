@@ -11,7 +11,29 @@
 - 단일 EXE 패키징, 실행 상태 UI, 로컬 진단 ZIP
 - V8 및 CModule 픽셀 연산, 자체 갱신 간격 제한, 채팅 영역 갱신 최적화
 
+## 현재 지원 작업 범위
+
+설치된 기존 32비트 `KakaoTalk.exe`와 Qt 64비트 `KakaoTalkUI.exe`가 대상이다. ZIP으로 제공된 구형 구조의 x64는 현재 작업 대상에서 제외했다.
+
+Qt 64비트는 최대 4개 원본 다운로드 슬롯을 사용하며 같은 원본은 중복 요청하지 않는다. 한 요청이 늦어져도 완료된 슬롯을 다음 원본에 넘긴다. 일시 오류/60초 초과 요청은 간격을 두고 최대 3회 시도하며 만료 응답은 재시도하지 않는다. 화면 밖 원본은 요청을 중지한다. 이 재시도는 다운로드에만 적용되며 준비된 움짤 반복재생에는 시간 제한이 없다.
+
 ## 개발 환경
+
+### 카카오톡 호환성
+
+| 카톡 종류 | 원본 자동 다운로드 | 개별·묶음 재생 검증 |
+| --- | --- | --- |
+| 기존 32비트 `KakaoTalk.exe` | 검증된 내부 구조에서 지원 | 기존 재생 지원. 잘림 영역 매핑 검사 통과, 실제 묶음 전송 검증은 별도 필요 |
+| 기존 64비트 `KakaoTalk.exe` | 미지원 | 자체 GDI 시험 프로그램에서 GIF/WebP 66건 통과, 실제 카톡 검증 필요 |
+| Qt 64비트 `KakaoTalkUI.exe` 26.10.0.492 | 카톡의 캐시 다운로드 사용 | 실제 개별 GIF 2개, 새 WebP, 묶음 WebP 2개 동시 반복재생 확인 |
+
+Qt 엔진은 개별 사진의 `details`와 묶음 사진의 `modelData`를 구분하며, 확장자가 비어 있어도 `isWebp`로 판별한다. 최대 8개를 연결하고 화면 밖의 재생 객체는 정리한다. 사진 파일 메시지·다른 카톡 버전·모든 묶음 배치가 검증됐다는 뜻은 아니다. 트레이, 종료 옵션, 자동 시작, 업데이트, 진단 ZIP은 공통 런처를 사용한다.
+
+Qt 재생 객체는 도우미 종료 시 정리되며 비정상 종료 시 마지막 heartbeat 이후 6초 뒤 GUI가 처리 가능한 시점에 제거된다. 진단에는 프레임·반복·다운로드 상태 수치만 추가하고 원본 경로·대화 내용은 내보내지 않는다. 설치된 카톡 파일을 수정하지 않는다.
+
+기존 x64 다운로드는 별도 구현이 필요하며 x86 함수 주소를 재사용하지 않는다. Windows/도우미 EXE의 비트 수와 카톡 프로세스의 비트 수는 별개다.
+
+친구가 제공한 `KakaoAutoPlay-v8-4K-performance-changes.md`의 V8 렌더러, CModule 픽셀 추출·비교·해시, WeakMap 버퍼 재사용, 최소 34ms 자체 갱신 간격, 성능 진단 필드는 현재 소스에 통합되어 있다. 추가로 대화 영역만 갱신하는 처리가 포함되어 있다. EXE를 다시 빌드하면 이 소스가 번들에 포함되며, 오래된 v8 번들에 직접 적용하던 패치를 새 버전에 덮어쓸 필요는 없다. 4K 최적화와 x64 대응은 별도 변경이며, 실제 4K PC에서의 끊김 해소를 보장하지 않는다.
 
 Windows x64, Python 3.11 x64, PowerShell 7. JavaScript 단위 검사는 Node.js를 사용한다. 런처 빌드는 Windows .NET Framework C# 컴파일러를 사용한다.
 
@@ -40,6 +62,9 @@ node tools/test-kakao-download-pump.cjs
 python tools/test-kakao-performance-native.py
 python tools/test-kakao-resolution-native.py
 python tools/test-kakao-refresh-native.py
+python tools/test-kakao-performance-native.py --x64
+python tools/test-kakao-resolution-native.py --x64
+python tools/test-kakao-refresh-native.py --x64
 ```
 
 ## 실행 및 진단

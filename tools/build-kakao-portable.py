@@ -13,6 +13,7 @@ for relative in ['tools', 'runtime', 'artifacts/kakao-internals/deps', 'dist/cod
 shutil.copy2(ROOT/'version.json', DEST/'version.json')
 for name in ['kakao-portable-launcher.py','kakao_update.py','kakao_diagnostics.py','kakao-autoplay-service.py','trace-kakao-player.py',
              'kakao-bitmap-bridge.js','kakao-auto-bridge.js','kakao-original-download.js',
+             'kakao_qt_worker.py','kakao-qt-live.js','kakao-qt-photo.qml',
              'kakao-gif-discovery.py','kakao-webp-frames.py','kakao_download_startup.py','kakao_lifetime.py','kakao_install.py','KAKAO-GIF-EXPERIMENT.md']:
     shutil.copy2(ROOT/'tools'/name, DEST/'tools'/name)
 for relative in ['artifacts/kakao-internals/deps/frida','artifacts/kakao-internals/deps/frida-17.27.4.dist-info',
@@ -37,7 +38,7 @@ Python, PowerShell 추가 설치가 필요하지 않습니다.
 4. 원할 때만 로그인시_자동시작_등록.cmd를 실행하세요.
    폴더 이동 전에는 중지하고, 이동 후 다시 등록하세요.
 
-32비트 카톡의 실행 경로를 자동 탐지해요. 버전 번호·파일 해시로 실행을 막지 않아요.
+32/64비트 카톡의 실행 경로를 자동 탐지해요. Qt 64비트(KakaoTalkUI.exe)는 개별·묶음 사진 원본 자동 다운로드와 반복재생을 지원해요. 기존 64비트(KakaoTalk.exe)는 저장된 원본 재생만 시험 지원해요. 버전 번호·파일 해시로 실행을 막지 않아요.
 실행 중인 카톡 → Windows 설치 등록 정보 → 기본 폴더 순서로 찾아요.
 내부 원본 다운로드 코드는 구조가 일치할 때만 연결해요. 다른 구조에서는 저장된 원본 재생만 시도해요.
 이전 자동재생 도우미가 있다면 먼저 중지하세요. 서로 다른 폴더의 도우미를 동시에 켜지 마세요.

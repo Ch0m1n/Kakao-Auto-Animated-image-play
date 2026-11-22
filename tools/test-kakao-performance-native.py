@@ -1,12 +1,13 @@
 """Compare shipped native pixel helpers with the original algorithm in our x86 fixture."""
 import json, subprocess, sys, time
 from pathlib import Path
+ARCH='x64' if '--x64' in sys.argv else 'x86'
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'artifacts/kakao-internals/deps'))
 import frida
 work=ROOT/'artifacts/tests/performance-native';work.mkdir(parents=True,exist_ok=True)
 identity=work/('fixture-'+str(time.time_ns())+'.json')
-process=subprocess.Popen([str(ROOT/'artifacts/tests/autoplay-agent-load/KakaoTalk.exe'),str(identity)],creationflags=0x08000000)
+process=subprocess.Popen([str(ROOT/('artifacts/tests/autoplay-agent-load'+('-x64' if ARCH=='x64' else '')+'/KakaoTalk.exe')),str(identity)],creationflags=0x08000000)
 session=None
 try:
     for _ in range(100):
@@ -37,7 +38,7 @@ rpc.exports.test=function(){
  return {cases,runtime:Script.runtime,arch:Process.arch,passed:true};
 };'''
     script=session.create_script(code,runtime='v8');script.load()
-    result=script.exports_sync.test();assert result['cases']==64 and result['arch']=='ia32'
+    result=script.exports_sync.test();assert result['cases']==64 and result['arch']==('x64' if ARCH=='x64' else 'ia32')
     (work/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))
 finally:
     if session:session.detach()
