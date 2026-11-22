@@ -1,0 +1,14 @@
+/artifacts/
+/dist/
+/runtime/
+/.venv/
+__pycache__/
+*.py[cod]
+*.exe
+*.dll
+*.pyd
+*.zip
+*.log
+.env
+.env.*
+.vs/

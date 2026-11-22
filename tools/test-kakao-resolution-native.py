@@ -1,0 +1,76 @@
+"""Exercise shipped Frida/GDI code only in our own hidden fixture, never Kakao."""
+import json, subprocess, sys, time
+from pathlib import Path
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT/'artifacts/kakao-internals/deps'))
+sys.path.insert(0,str(ROOT/'dist/codecs/deps'))
+import frida
+from PIL import Image, ImageDraw
+work=ROOT/'artifacts/tests/resolution-playback';work.mkdir(parents=True,exist_ok=True)
+identity=work/'fixture.json';identity.unlink(missing_ok=True)
+process=subprocess.Popen([str(ROOT/'artifacts/tests/autoplay-agent-load/KakaoTalk.exe'),str(identity)],creationflags=0x08000000)
+session=None
+try:
+    for _ in range(100):
+        if identity.exists():break
+        time.sleep(.05)
+    info=json.loads(identity.read_text());assert info['pid']==process.pid and process.poll() is None
+    session=frida.attach(process.pid)
+    base=(ROOT/'tools/kakao-bitmap-bridge.js').read_text(encoding='utf-8-sig').split('const hwnd=')[0]
+    code='const BRIDGE_CONFIG='+json.dumps({'hwnd':info['hwnd'],'managed':True})+';\n'+base+(ROOT/'tools/kakao-auto-bridge.js').read_text(encoding='utf-8-sig')
+    code+='''
+rpc.exports.probefile=function(path){return open(path,image=>{
+ const a=Memory.alloc(4),b=Memory.alloc(4);getWidth(image,a);const w=a.readU32();getHeight(image,b);const h=b.readU32();
+ if(makeBitmap(image,a,0xffffffff)!==0)throw Error('fixture bitmap');const bitmap=a.readPointer();
+ try{return match(bitmap,w,h);}finally{deleteObject(bitmap);}
+});};
+rpc.exports.benchmark=function(path){return open(path,image=>{
+ const out=Memory.alloc(4);getWidth(image,out);const w=out.readU32();getHeight(image,out);const h=out.readU32();
+ if(makeBitmap(image,out,0xffffffff)!==0)throw Error('fixture bitmap');const bitmap=out.readPointer(),started=Date.now();
+ try{for(let i=0;i<100;i++)if(!match(bitmap,w,h))throw Error('benchmark match');return {iterations:100,milliseconds:Date.now()-started};}finally{deleteObject(bitmap);}
+});};
+'''
+    script=session.create_script(code,runtime='v8');errors=[];script.on('message',lambda message,data:errors.append(message) if message['type']=='error' else None);script.load();api=script.exports_sync
+    results=[]
+    for number in range(2):
+        frames=[]
+        for frame in range(2):
+            im=Image.new('RGB',(200,200),'white');d=ImageDraw.Draw(im)
+            d.rectangle((8,15,85,135),fill='red' if number==0 else 'green');d.ellipse((75,65,190,190),fill='blue' if number==0 else 'orange')
+            d.line((0,180-frame*15,180,0),fill='black',width=7);frames.append(im)
+        gif=work/f'source-{number}.gif';frames[0].save(gif,save_all=True,append_images=frames[1:],duration=100,loop=0)
+        assert api.registerfile(str(gif),f'fixture-{number}')['status']=='registered'
+        with Image.open(gif) as original: first=original.convert('RGB')
+        for size in [100,150,200,250,300,350,400,600,800]:
+            for method in [Image.Resampling.NEAREST,Image.Resampling.BILINEAR,Image.Resampling.BICUBIC]:
+                png=work/f'preview-{number}-{size}-{method}.png';first.resize((size,size),method).save(png)
+                found=api.probefile(str(png));results.append({'source':number,'size':size,'filter':int(method),'match':found})
+                if found!=f'fixture-{number}':print('MISS',results[-1],api.snapshot()['comparisons'][-1:],flush=True)
+    unrelated=work/'unrelated.png';Image.new('RGB',(300,300),'purple').save(unrelated);assert api.probefile(str(unrelated)) is None
+    # Transparent, portrait sources are also displayed flattened onto different
+    # backgrounds by GDI. Reference variants cover both white and black.
+    frames=[]
+    for offset in [0,12]:
+        im=Image.new('RGBA',(140,200),(0,0,0,0));d=ImageDraw.Draw(im)
+        d.rectangle((15,20+offset,65,120),fill=(255,30,20,255));d.ellipse((60,85,125,180),fill=(20,50,255,255));frames.append(im)
+    transparent=work/'transparent.gif';frames[0].save(transparent,save_all=True,append_images=frames[1:],duration=100,loop=0,disposal=2)
+    assert api.registerfile(str(transparent),'transparent')['status']=='registered'
+    with Image.open(transparent) as original:first=original.convert('RGBA')
+    for scale in [.75,1,1.5,2,3,4]:
+        for background in ['white','black']:
+            im=Image.new('RGBA',first.size,background);im.alpha_composite(first)
+            png=work/f'transparent-{scale}-{background}.png';im.convert('RGB').resize((round(140*scale),round(200*scale)),Image.Resampling.BICUBIC).save(png)
+            found=api.probefile(str(png));assert found=='transparent',(scale,background,found,api.snapshot()['comparisons'][-1:])
+    benchmark=api.benchmark(str(work/'preview-0-800-3.png'))
+    # Identical first frames from separate animations are ambiguous; never
+    # choose an arbitrary ID based on registration order or a stale cache.
+    assert api.registerfile(str(work/'source-0.gif'),'duplicate')['status']=='registered'
+    assert api.probefile(str(work/'preview-0-300-3.png')) is None
+    assert not errors,errors
+    (work/'after.json').write_text(json.dumps({'cases':results,'transparentCases':12,'benchmark':benchmark,'snapshot':api.snapshot()},indent=2),encoding='utf8')
+    api.stop();script.unload();assert all(x['match']==f"fixture-{x['source']}" for x in results),'scaled preview misses'
+    print(f'Native GDI/Frida: {len(results)+12} scaled previews passed; unrelated/ambiguous rejected; {benchmark}')
+finally:
+    if session:session.detach()
+    if process.poll() is None:process.terminate()
+    process.wait(timeout=5)
