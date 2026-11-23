@@ -32,8 +32,24 @@ rpc.exports.frames=function(id){
 };
 rpc.exports.benchmark=function(path){return open(path,image=>{
  const out=Memory.alloc(Process.pointerSize);getWidth(image,out);const w=out.readU32();getHeight(image,out);const h=out.readU32();
- if(makeBitmap(image,out,0xffffffff)!==0)throw Error('fixture bitmap');const bitmap=out.readPointer(),started=Date.now();
- try{for(let i=0;i<100;i++)if(!match(bitmap,w,h))throw Error('benchmark match');return {iterations:100,milliseconds:Date.now()-started};}finally{deleteObject(bitmap);}
+ if(makeBitmap(image,out,0xffffffff)!==0)throw Error('fixture bitmap');const bitmap=out.readPointer();
+ try{
+  clearMatches();match(bitmap,w,h);
+  const hits=stats.performance.bitmapCacheHits,started=Date.now();
+  for(let i=0;i<100;i++)if(!match(bitmap,w,h))throw Error('benchmark match');
+  const cachedMs=Date.now()-started,cacheHits=stats.performance.bitmapCacheHits-hits;
+  if(cacheHits!==100)throw Error('DIB cache not exercised');
+  const view=bitmapView(bitmap,w,h),last=view.bits.add(view.size-1),byte=last.readU8();last.writeU8(byte^1);
+  match(bitmap,w,h);if(stats.performance.bitmapCacheHits!==hits+100)throw Error('Last-byte mutation missed');last.writeU8(byte);
+  const originalView=bitmapView;let normalizedMs;
+  try{
+    bitmapView=()=>null;clearMatches();match(bitmap,w,h);
+    const started=Date.now();
+    for(let i=0;i<100;i++)if(!match(bitmap,w,h))throw Error('normalized benchmark match');
+    normalizedMs=Date.now()-started;
+  }finally{bitmapView=originalView;}
+  return {iterations:100,cachedMs,normalizedMs,cacheHits};
+ }finally{deleteObject(bitmap);}
 });};
 '''
     script=session.create_script(code,runtime='v8');errors=[];script.on('message',lambda message,data:errors.append(message) if message['type']=='error' else None);script.load();api=script.exports_sync
@@ -53,7 +69,7 @@ rpc.exports.benchmark=function(path){return open(path,image=>{
         for size in [100,150,200,250,300,350,400,600,800]:
             for method in [Image.Resampling.NEAREST,Image.Resampling.BILINEAR,Image.Resampling.BICUBIC]:
                 png=work/f'preview-{number}-{size}-{method}.png';first.resize((size,size),method).save(png)
-                found=api.probefile(str(png));results.append({'source':number,'size':size,'filter':int(method),'match':found})
+                matched=api.probefile(str(png));found=matched['id'] if matched else None;results.append({'source':number,'size':size,'filter':int(method),'match':found})
                 if found!=f'fixture-{number}':print('MISS',results[-1],api.snapshot()['comparisons'][-1:],flush=True)
     unrelated=work/'unrelated.png';Image.new('RGB',(300,300),'purple').save(unrelated);assert api.probefile(str(unrelated)) is None
     # Transparent, portrait sources are also displayed flattened onto different
@@ -69,7 +85,7 @@ rpc.exports.benchmark=function(path){return open(path,image=>{
         for background in ['white','black']:
             im=Image.new('RGBA',first.size,background);im.alpha_composite(first)
             png=work/f'transparent-{scale}-{background}.png';im.convert('RGB').resize((round(140*scale),round(200*scale)),Image.Resampling.BICUBIC).save(png)
-            found=api.probefile(str(png));assert found=='transparent',(scale,background,found,api.snapshot()['comparisons'][-1:])
+            matched=api.probefile(str(png));found=matched['id'] if matched else None;assert found=='transparent',(scale,background,found,api.snapshot()['comparisons'][-1:])
     # Exercise the shipped animated WebP -> PNG -> native bitmap pipeline too.
     import hashlib, importlib.util
     spec=importlib.util.spec_from_file_location('webp_frames',ROOT/'tools/kakao-webp-frames.py')
@@ -81,15 +97,45 @@ rpc.exports.benchmark=function(path){return open(path,image=>{
     media.activate(key);decoded=api.frames(key)
     assert decoded['ends']==[80,200] and decoded['duration']==200,decoded
     media.unregister(key)
+    # Tall/wide originals are center-cropped to Kakao's 1:3 / 3:1 thumbnail.
+    # Use synthetic GIF and WebP data only; test scaled previews and actual frames.
+    cover_cases=0
+    for kind in ('GIF','WEBP'):
+        for size in ((82,300),(210,57)):
+            frames=[]
+            for phase in (0,1):
+                image=Image.new('RGB',size,'white');draw=ImageDraw.Draw(image)
+                draw.rectangle((5,10,size[0]//2,size[1]-20),fill='red')
+                draw.ellipse((size[0]//3,30,size[0]-5,size[1]-5),fill='blue')
+                draw.line((0,phase*10,size[0]-1,size[1]-1),fill='black',width=5);frames.append(image)
+            path=work/f'cover-{size[0]}-{kind.lower()}.{kind.lower()}'
+            frames[0].save(path,format=kind,save_all=True,append_images=frames[1:],duration=[80,120],loop=0,lossless=True)
+            key=hashlib.sha256(path.read_bytes()).hexdigest()
+            assert media.registerfile(str(path.resolve()),key)['status']=='registered'
+            media.activate(key);assert api.frames(key)['duration']==200
+            crop=(0,27,82,273) if size[0]==82 else (19,0,190,57)
+            expected={'x':crop[0],'y':crop[1],'w':crop[2]-crop[0],'h':crop[3]-crop[1]}
+            with Image.open(path) as image:first=image.convert('RGB')
+            for scale in (1,1.5,2,3,4):
+                preview=work/f'cover-{kind}-{size[0]}-{scale}.png'
+                first.crop(crop).resize((round(expected['w']*scale),round(expected['h']*scale)),Image.Resampling.BICUBIC).save(preview)
+                matched=api.probefile(str(preview));assert matched=={'id':key,'crop':expected},matched
+                cover_cases+=1
+            # Identical cropped first frames must not be chosen arbitrarily.
+            duplicate=key+'-duplicate'
+            if kind=='GIF':api.registerfile(str(path.resolve()),duplicate)
+            else:api.registerpreview(str(media.webp[key]['folder']/'preview.png'),duplicate,{'frames':2,'format':'WEBP'})
+            assert api.probefile(str(preview)) is None
+            api.unregister(duplicate);media.unregister(key)
     benchmark=api.benchmark(str(work/'preview-0-800-3.png'))
     # Identical first frames from separate animations are ambiguous; never
     # choose an arbitrary ID based on registration order or a stale cache.
     assert api.registerfile(str(work/'source-0.gif'),'duplicate')['status']=='registered'
     assert api.probefile(str(work/'preview-0-300-3.png')) is None
     assert not errors,errors
-    (work/'after.json').write_text(json.dumps({'cases':results,'transparentCases':12,'benchmark':benchmark,'snapshot':api.snapshot()},indent=2),encoding='utf8')
+    (work/'after.json').write_text(json.dumps({'cases':results,'transparentCases':12,'coverCases':cover_cases,'benchmark':benchmark,'snapshot':api.snapshot()},indent=2),encoding='utf8')
     api.stop();script.unload();assert all(x['match']==f"fixture-{x['source']}" for x in results),'scaled preview misses'
-    print(f'Native GDI/Frida: {len(results)+12} scaled previews passed; unrelated/ambiguous rejected; {benchmark}')
+    print(f'Native GDI/Frida: {len(results)+12} scaled previews, {cover_cases} cropped GIF/WebP previews passed; unrelated/ambiguous rejected; {benchmark}')
 finally:
     if session:session.detach()
     if process.poll() is None:process.terminate()

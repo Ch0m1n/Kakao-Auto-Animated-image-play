@@ -10,6 +10,7 @@ spec.loader.exec_module(module)
 Image=module.Image
 
 class API:
+    def registerfile(self,path,key):return {'status':'unsupported'}
     def registerpreview(self,path,key,meta):
         self.preview=path;self.meta=meta
         return {'status':'registered'}
@@ -40,6 +41,23 @@ class FramesTests(unittest.TestCase):
         self.assertEqual(self.api.meta['format'],'GIF')
         self.media.activate(key)
         with Image.open(self.api.pack['paths'][0]) as image:self.assertEqual(image.size,(168,300))
+    def test_native_gif_rejection_falls_back_to_pillow(self):
+        for status in ('unsupported','error'):
+            self.api.registerfile=lambda *args:{'status':status}
+            path,key=self.source('GIF',(100,120))
+            self.assertEqual(self.media.registerfile(str(path),key)['status'],'registered')
+            self.media.activate(key)
+            self.assertEqual(self.api.pack['delays'],[40,90,140])
+            self.assertEqual(self.api.meta['format'],'GIF')
+    def test_native_limit_does_not_retry_or_bypass_budget(self):
+        self.api.registerfile=lambda *args:{'status':'limit'}
+        path,key=self.source('GIF',(100,120))
+        self.assertEqual(self.media.registerfile(str(path),key)['status'],'limit')
+        self.assertFalse(hasattr(self.api,'preview'))
+    def test_unreadable_source_is_reported(self):
+        self.assertEqual(self.media.registerfile(str(self.root/'missing.gif'),'missing')['status'],'error')
+        path=self.root/'broken.gif';path.write_bytes(b'GIF89a broken')
+        self.assertEqual(self.media.registerfile(str(path),hashlib.sha256(path.read_bytes()).hexdigest())['status'],'error')
     def test_changed_source_is_not_activated(self):
         path,key=self.source('WEBP',(48,40));self.media.registerfile(str(path),key)
         path.write_bytes(b'changed')

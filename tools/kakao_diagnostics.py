@@ -143,10 +143,10 @@ def export(destination=None):
         'qt':qt_summary(progress),
         'performance':{
             'architecture':progress.get('architecture') if progress.get('architecture') in ('ia32','x64') else None,
-            'patch':progress.get('performancePatch') if progress.get('performancePatch')=='4k-perf-v1' else None,
+            'patch':progress.get('performancePatch') if progress.get('performancePatch') in ('4k-perf-v1','4k-dib-cache') else None,
             'maxRefreshFps':progress.get('maxRefreshFps'),
             **{key:value for key,value in progress.get('performance',{}).items()
-               if key in ('calls','matchMs','fromBitmapMs','normalizeMs','chooseMs') and
+               if key in ('calls','matchMs','fromBitmapMs','normalizeMs','chooseMs','bitmapCacheHits') and
                isinstance(value,(int,float)) and not isinstance(value,bool) and 0<=value<1e15}},
         'downloads':{k:downloads.get(k) for k in ['available','reason','created','saved','requested','backfilled','backfilledFormats','concurrency','maxInFlight','pending','errors']},
         'privacy':'Media, source identities, window titles, message contents and full URLs are not included.'}

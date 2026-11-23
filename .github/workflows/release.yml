@@ -38,6 +38,14 @@ jobs:
           if ($LASTEXITCODE) { throw 'Startup migration test failed' }
           node tools/test-kakao-resolution.cjs
           if ($LASTEXITCODE) { throw 'Rendering test failed' }
+          node tools/test-kakao-refresh.cjs
+          if ($LASTEXITCODE) { throw 'Refresh regression test failed' }
+          python tools/test-kakao-webp-frames.py
+          if ($LASTEXITCODE) { throw 'GIF/WebP fallback test failed' }
+          python tools/test-kakao-performance-native.py
+          if ($LASTEXITCODE) { throw 'Native pixel comparison test failed' }
+          python tools/test-kakao-performance-native.py --x64
+          if ($LASTEXITCODE) { throw 'Native x64 pixel comparison test failed' }
           foreach ($test in @('test-kakao-install.py','test-kakao-diagnostics.py','test-kakao-autoplay-service.py','test-kakao-lifetime.py','test-kakao-download-startup.py')) {
             python "tools/$test"
             if ($LASTEXITCODE) { throw "$test failed" }

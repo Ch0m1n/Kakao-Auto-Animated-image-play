@@ -8,6 +8,9 @@ const sources=new Map(),buckets=new Map(),cache=new Map(),pending=new Set(),obse
 const stats={rendererVersion:10,captured:false,registered:0,active:0,maxActive:0,replacements:0,matches:0,ambiguous:0,matchErrors:0,errors:[],rejected:0,bySource:{},comparisons:[],sizes:{}};
 const MAX_REFS=32*1024*1024,MAX_DECODED=128*1024*1024;
 const SIGNATURE_SIZE=96,MAX_MATCH_CACHE=128;
+const MAX_BITMAP_CACHE=32*1024*1024;
+let bitmapCacheBytes=0;
+const flushGdi=fn(gdi,'GdiFlush','int',[]);
 const MIN_REFRESH_MS=34;
 const refreshClient=fn(user,'GetClientRect','int',['pointer','pointer']);
 const refreshMap=fn(user,'MapWindowPoints','int',['pointer','pointer','pointer','uint']);
@@ -50,10 +53,11 @@ function refreshConversation(root){
   }catch(_){stats.refreshSkipped++;}
 }
 stats.architecture=Process.arch;stats.pointerSize=Process.pointerSize;
-stats.performancePatch='4k-perf-v1';stats.maxRefreshFps=1000/MIN_REFRESH_MS;
-stats.performance={calls:0,matchMs:0,fromBitmapMs:0,normalizeMs:0,chooseMs:0};
+stats.performancePatch='4k-dib-cache';stats.maxRefreshFps=1000/MIN_REFRESH_MS;
+stats.performance={calls:0,matchMs:0,fromBitmapMs:0,normalizeMs:0,chooseMs:0,bitmapCacheHits:0};
 // PERF_NATIVE_BEGIN: arrays passed to these helpers are immutable snapshots.
 const pixelModule=new CModule(`
+extern int memcmp(const void *a,const void *b,${Process.pointerSize===8?'unsigned long long':'unsigned int'} n);
 void copy_crop(const unsigned char *scan, int stride, int w, int h, unsigned char *out) {
   int x,y,c; unsigned int k=0;
   for(y=4;y<h-4;y++) {
@@ -62,12 +66,12 @@ void copy_crop(const unsigned char *scan, int stride, int w, int h, unsigned cha
   }
 }
 int equal_bytes(const unsigned char *a,const unsigned char *b,unsigned int n) {
-  unsigned int i;for(i=0;i<n;i++)if(a[i]!=b[i])return 0;return 1;
+  return memcmp(a,b,n)==0;
 }
 unsigned int hash_bytes(const unsigned char *a,unsigned int n) {
   unsigned int i,h=2166136261U;for(i=0;i<n;i++)h=(h^a[i])*16777619U;return h;
 }
-`);
+`,{memcmp:Module.load('msvcrt.dll').getExportByName('memcmp')});
 const copyCrop=new NativeFunction(pixelModule.copy_crop,'void',['pointer','int','int','int','pointer']);
 const equalBytes=new NativeFunction(pixelModule.equal_bytes,'int',['pointer','pointer','uint']);
 const hashBytes=new NativeFunction(pixelModule.hash_bytes,'uint',['pointer','uint']);
@@ -87,6 +91,7 @@ function fingerprint(bytes){return hashBytes(nativeBytes(bytes),bytes.length).to
 function same(a,b){return a.length===b.length&&equalBytes(nativeBytes(a),nativeBytes(b),a.length)!==0;}
 // PERF_NATIVE_END
 const imageThumbnail=fn(gdip,'GdipGetImageThumbnail','int',['pointer','uint','uint','pointer','pointer','pointer']);
+const cloneArea=fn(gdip,'GdipCloneBitmapAreaI','int',['int','int','int','int','int','pointer','pointer']);
 let refBytes=0,decodedBytes=0,busy=false,stopped=false,cleaned=false,timer=null;
 function pixels(image,w,h){
   const rect=Memory.alloc(16),data=Memory.alloc(BITMAP_DATA_SIZE);
@@ -124,6 +129,28 @@ function mapSourceRect(w,h,x,y,width,height,frameW,frameH){
   const right=Math.min(frameW,Math.max(left+1,Math.round((x+width)*frameW/w))),bottom=Math.min(frameH,Math.max(top+1,Math.round((y+height)*frameH/h)));
   return {x:left,y:top,w:right-left,h:bottom-top};
 }
+// Kakao clamps very tall/wide photo thumbnails to a 1:3 / 3:1 center crop.
+// Build this extra reference once at registration, never while painting.
+function coverRect(w,h){
+  let cw=w,ch=h;
+  if(h>3*w)ch=3*w;else if(w>3*h)cw=3*h;else return null;
+  if(cw*ch/(w*h)<.65)return null;
+  return {x:Math.floor((w-cw)/2),y:Math.floor((h-ch)/2),w:cw,h:ch};
+}
+function sourceCandidates(w,h){
+  const result=[];
+  for(const s of sources.values()){
+    if(compatibleAspect(w,h,s.w,s.h))result.push(s);
+    else if(s.cover&&compatibleAspect(w,h,s.cover.crop.w,s.cover.crop.h))result.push(s.cover);
+  }
+  return result;
+}
+function matchResult(candidate){return {id:candidate.id,crop:candidate.crop||null};}
+function mapMatchedRect(w,h,x,y,width,height,s,matched){
+  const c=matched.crop;if(!c)return mapSourceRect(w,h,x,y,width,height,s.w,s.h);
+  const r=mapSourceRect(w,h,x,y,width,height,c.w,c.h);
+  return r?{x:r.x+c.x,y:r.y+c.y,w:r.w,h:r.h}:null;
+}
 function coarsePixels(bytes,w,h){
   const width=w-8,height=h-8,grid=12,sums=new Float64Array(grid*grid*3),counts=new Uint32Array(grid*grid);
   for(let y=0;y<height;y++)for(let x=0;x<width;x++){
@@ -157,7 +184,7 @@ function unregister(id){
   const s=sources.get(id);if(!s)return;
   release(s);refBytes-=s.referenceCost;sources.delete(id);pending.delete(id);
   for(const key of s.bucketKeys){const bucket=buckets.get(key).filter(x=>x!==id);if(bucket.length)buckets.set(key,bucket);else buckets.delete(key);}
-  delete stats.bySource[id];cache.clear();stats.registered=sources.size;
+  delete stats.bySource[id];clearMatches();stats.registered=sources.size;
 }
 function register(path,id,external=null){
   if(sources.has(id))return {status:'known'};
@@ -172,12 +199,23 @@ function register(path,id,external=null){
     }
     if(!d){stats.rejected++;return {status:'unsupported'};}
     if(!external&&selectFrame(image,d.guid,0)!==0)throw Error('Cannot select first frame');
-    const refs=normalizedPixels(image,true),ref=refs[0],referenceCost=refs.reduce((n,value)=>n+value.length,0);if(refBytes+referenceCost>MAX_REFS)return {status:'limit'};
+    const refs=normalizedPixels(image,true),ref=refs[0];
+    let referenceCost=refs.reduce((n,value)=>n+value.length,0),cover=null;
+    const crop=coverRect(d.w,d.h);
+    if(crop){
+      const out=Memory.alloc(Process.pointerSize);
+      if(cloneArea(crop.x,crop.y,crop.w,crop.h,0x26200a,image,out)===0){
+        const cut=out.readPointer();
+        try{const values=normalizedPixels(cut,true);cover={id,crop,refs:values,coarse:values.map(value=>coarsePixels(value,SIGNATURE_SIZE,SIGNATURE_SIZE))};referenceCost+=values.reduce((n,value)=>n+value.length,0);}
+        finally{dispose(cut);}
+      }
+    }
+    if(refBytes+referenceCost>MAX_REFS)return {status:'limit'};
     const bucketKeys=[...new Set(refs.map(fingerprint))];
     const report={format:external?external.format:'GIF',width:d.w,height:d.h,frames:d.n,active:false,replacements:0,frameUse:{},loops:0};
-    sources.set(id,{id,path,external:!!external,w:d.w,h:d.h,n:d.n,ref,refs,coarse:refs.map(value=>coarsePixels(value,SIGNATURE_SIZE,SIGNATURE_SIZE)),referenceCost,bucketKeys,frames:null,lastSeen:0,report});
+    sources.set(id,{id,path,external:!!external,w:d.w,h:d.h,n:d.n,ref,refs,cover,coarse:refs.map(value=>coarsePixels(value,SIGNATURE_SIZE,SIGNATURE_SIZE)),referenceCost,bucketKeys,frames:null,lastSeen:0,report});
     for(const key of bucketKeys){if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(id);}
-    refBytes+=referenceCost;cache.clear();stats.registered=sources.size;stats.bySource[id]=report;
+    refBytes+=referenceCost;clearMatches();stats.registered=sources.size;stats.bySource[id]=report;
     return {status:'registered',width:d.w,height:d.h,frames:d.n};
   });}catch(e){return {status:'error',reason:String(e)};}finally{busy=false;}
 }
@@ -239,10 +277,10 @@ function activate(id,pack=null){
   }finally{busy=false;}
 }
 function chooseSource(actual,w,h){
-  const candidates=[...sources.values()].filter(s=>compatibleAspect(w,h,s.w,s.h));
+  const candidates=sourceCandidates(w,h);
   const ids=new Set(buckets.get(fingerprint(actual))||[]);
-  const exact=candidates.filter(s=>ids.has(s.id)&&s.refs.some(ref=>same(actual,ref)));
-  if(exact.length===1){stats.matches++;return exact[0].id;}
+  const exact=candidates.filter(s=>(s.crop||ids.has(s.id))&&s.refs.some(ref=>same(actual,ref)));
+  if(exact.length===1){stats.matches++;return matchResult(exact[0]);}
   if(exact.length>1){stats.ambiguous++;return null;}
   const ranked=[],actualCoarse=coarsePixels(actual,SIGNATURE_SIZE,SIGNATURE_SIZE);
   for(const s of candidates){
@@ -253,7 +291,7 @@ function chooseSource(actual,w,h){
       for(let i=0;i<actual.length;i+=step){const diff=Math.abs(actual[i]-ref[i]);error+=diff;bad+=diff>24;total++;min=Math.min(min,ref[i]);max=Math.max(max,ref[i]);}
       let coarse=0,coarseMax=0;
       for(let i=0;i<actualCoarse.length;i++){const delta=Math.abs(actualCoarse[i]-s.coarse[variant][i]);coarse+=delta;coarseMax=Math.max(coarseMax,delta);}
-      const score={id:s.id,error:error/total,bad:bad/total,range:max-min,coarse:coarse/actualCoarse.length,coarseMax};
+      const score={id:s.id,crop:s.crop||null,error:error/total,bad:bad/total,range:max-min,coarse:coarse/actualCoarse.length,coarseMax};
       if(!best||score.error<best.error)best=score;
     }
     if(best)ranked.push(best);
@@ -262,27 +300,57 @@ function chooseSource(actual,w,h){
   if(best&&stats.comparisons.length<40)stats.comparisons.push({w,h,...best});
   if(best&&((best.error<8&&best.bad<.08&&best.range>50&&best.coarse<5&&best.coarseMax<36&&(!ranked[1]||ranked[1].error-best.error>3))||
     (best.error<12&&best.bad<.16&&best.range>50&&best.coarse<3&&best.coarseMax<15&&ranked.slice(1).every(x=>x.coarse-best.coarse>3)))){
-    stats.matches++;return best.id;
+    stats.matches++;return matchResult(best);
   }
   return null;
 }
-function match(bitmap,w,h){
+// Compare every byte of a bounded 32-bit DIB snapshot before reusing a match.
+// HBITMAP identity alone is unsafe: Kakao can repaint an existing bitmap.
+// DDBs and unsupported layouts retain the normalized-pixel validation path.
+function bitmapView(bitmap,w,h,info=null){
+  if(!info){info=Memory.alloc(BITMAP_SIZE);if(getObject(bitmap,BITMAP_SIZE,info)!==BITMAP_SIZE)return null;}
+  const stride=info.add(12).readS32(),bits=info.add(Process.pointerSize===8?24:20).readPointer();
+  if(bits.isNull()||info.add(16).readU16()!==1||info.add(18).readU16()!==32||stride<w*4||stride>65536)return null;
+  const size=stride*h;if(size<=0||size>MAX_BITMAP_CACHE)return null;
+  if(!flushGdi())return null;
+  return {bits,stride,size};
+}
+function forgetMatch(key){
+  const old=cache.get(key);if(old&&old.bitmap)bitmapCacheBytes-=old.bitmap.size;
+  cache.delete(key);
+}
+function clearMatches(){cache.clear();bitmapCacheBytes=0;}
+function rememberMatch(key,entry,view){
+  forgetMatch(key);
+  while(cache.size>=MAX_MATCH_CACHE||(view&&bitmapCacheBytes+view.size>MAX_BITMAP_CACHE))forgetMatch(cache.keys().next().value);
+  if(view){
+    const bits=Memory.alloc(view.size);Memory.copy(bits,view.bits,view.size);
+    entry.bitmap={bits,stride:view.stride,size:view.size};bitmapCacheBytes+=view.size;
+  }
+  cache.set(key,entry);
+}
+function match(bitmap,w,h,info=null){
   const started=Date.now();stats.performance.calls++;
   try{
   const key=bitmap.toString();
-  if(![...sources.values()].some(s=>compatibleAspect(w,h,s.w,s.h)))return null;
+  if(!sourceCandidates(w,h).length)return null;
+  let view=null;
+  try{view=bitmapView(bitmap,w,h,info);}catch(_){/* Fall back to GDI+ on inaccessible storage. */}
+  const old=cache.get(key);
+  if(view&&old&&old.w===w&&old.h===h&&old.bitmap&&old.bitmap.stride===view.stride&&old.bitmap.size===view.size&&equalBytes(old.bitmap.bits,view.bits,view.size)){
+    stats.performance.bitmapCacheHits++;return old.id;
+  }
   const out=Memory.alloc(Process.pointerSize);let found=null;
   const fromStarted=Date.now(),fromResult=fromBitmap(bitmap,ptr(0),out);
   stats.performance.fromBitmapMs+=Date.now()-fromStarted;
   if(fromResult===0){
     const image=out.readPointer();try{
-      const normalizeStarted=Date.now(),actual=normalizedPixels(image)[0],old=cache.get(key);
+      const normalizeStarted=Date.now(),actual=normalizedPixels(image)[0];
       stats.performance.normalizeMs+=Date.now()-normalizeStarted;
-      if(old&&old.w===w&&old.h===h&&same(actual,old.pixels))return old.id;
-      const chooseStarted=Date.now();found=chooseSource(actual,w,h);stats.performance.chooseMs+=Date.now()-chooseStarted;
-      if(cache.size>=MAX_MATCH_CACHE)cache.delete(cache.keys().next().value);
-      cache.set(key,{w,h,pixels:actual,id:found});
-    }catch(_){stats.matchErrors++;cache.delete(key);}finally{dispose(image);}
+      if(old&&old.w===w&&old.h===h&&same(actual,old.pixels))found=old.id;
+      else{const chooseStarted=Date.now();found=chooseSource(actual,w,h);stats.performance.chooseMs+=Date.now()-chooseStarted;}
+      rememberMatch(key,{w,h,pixels:actual,id:found},view);
+    }catch(_){stats.matchErrors++;forgetMatch(key);}finally{dispose(image);}
   }
   return found;
   }finally{stats.performance.matchMs+=Date.now()-started;}
@@ -298,18 +366,18 @@ listeners.push(Interceptor.attach(blend,{onEnter(args){
     const size=w+'x'+h;if(Object.keys(stats.sizes).length<100||stats.sizes[size])stats.sizes[size]=(stats.sizes[size]||0)+1;
     const x=args[6].toInt32(),y=args[7].toInt32(),width=args[8].toInt32(),height=args[9].toInt32();
     if(!mapSourceRect(w,h,x,y,width,height,w,h))return;
-    const id=match(bitmap,w,h);if(!id)return;
+    const matched=match(bitmap,w,h,info);if(!matched)return;const id=matched.id;
     const s=sources.get(id);s.lastSeen=Date.now();
     if(!s.frames){if(!s.failed)pending.add(id);return;}
     const age=Date.now()-s.started,elapsed=age%s.duration,i=s.frames.findIndex(f=>elapsed<f.end);
     const cycle=Math.floor(age/s.duration);if(cycle>s.lastCycle){s.report.loops+=cycle-s.lastCycle;s.lastCycle=cycle;}
-    const rect=mapSourceRect(w,h,x,y,width,height,s.w,s.h);if(!rect||i<0)return;
+    const rect=mapMatchedRect(w,h,x,y,width,height,s,matched);if(!rect||i<0)return;
     args[5]=s.frames[i].dc;args[6]=ptr(rect.x);args[7]=ptr(rect.y);args[8]=ptr(rect.w);args[9]=ptr(rect.h);
     stats.replacements++;s.report.replacements++;
     s.report.frameUse[i]=(s.report.frameUse[i]||0)+1;
   }catch(e){stats.errors.push(String(e));stopped=true;}finally{busy=false;}
 }}));
-listeners.push(Interceptor.attach(gdi.getExportByName('DeleteObject'),{onEnter(args){cache.delete(args[0].toString());}}));
+listeners.push(Interceptor.attach(gdi.getExportByName('DeleteObject'),{onEnter(args){forgetMatch(args[0].toString());}}));
 // Observe only GIF paths opened by this application; do not inspect message text or credentials.
 const kernel=Process.getModuleByName('kernelbase.dll');
 listeners.push(Interceptor.attach(kernel.getExportByName('CreateFileW'),{onEnter(args){
@@ -339,7 +407,7 @@ rpc.exports={
   registerpreview(path,id,meta){return register(path,id,meta);},
   updatepath(id,path){const s=sources.get(id);if(s&&!s.external)s.path=path;},
   work(){const files=[...observed];observed.clear();return {files,pending:[...pending]};},
-  snapshot(){return {...stats,windows:watchedWindows.map(w=>w.toString()),referenceBytes:refBytes,decodedBytes};},
-  stop(){if(cleaned)return;cleaned=true;stopped=true;clearTimeout(timer);for(const l of listeners)l.detach();for(const s of sources.values())release(s);sources.clear();buckets.clear();cache.clear();for(const w of watchedWindows)refreshConversation(w);}
+  snapshot(){return {...stats,windows:watchedWindows.map(w=>w.toString()),referenceBytes:refBytes,decodedBytes,bitmapCacheBytes};},
+  stop(){if(cleaned)return;cleaned=true;stopped=true;clearTimeout(timer);for(const l of listeners)l.detach();for(const s of sources.values())release(s);sources.clear();buckets.clear();clearMatches();for(const w of watchedWindows)refreshConversation(w);}
 };
 send({status:'bridge-armed',mode:'automatic-multiple-gifs'});

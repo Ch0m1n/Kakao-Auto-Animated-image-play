@@ -16,18 +16,18 @@ class MediaSources:
         self.cancelled = cancelled or (lambda:False)
 
     def registerfile(self, path, key):
-        with open(path, 'rb') as stream:
-            header = stream.read(12)
-        if header[:6] in (b'GIF87a', b'GIF89a'):
-            with Image.open(path) as probe:
-                if probe.width <= 210 and probe.height <= 300 and probe.n_frames <= 256:
-                    return self.api.registerfile(path, key)
         try:
             if hashlib.sha256(Path(path).read_bytes()).hexdigest() != key:
                 return {'status': 'error', 'reason': 'source changed'}
             with Image.open(path) as image:
                 if image.format not in ('GIF', 'WEBP') or not 2 <= image.n_frames <= 10000:
                     return {'status': 'unsupported'}
+                if image.format == 'GIF' and image.width <= 210 and image.height <= 300 and image.n_frames <= 256:
+                    result = self.api.registerfile(path, key)
+                    if result['status'] not in ('unsupported', 'error'):
+                        return result
+                    # GDI+ has a stricter decoded-memory budget and may reject
+                    # GIFs that Pillow can decode into a bounded frame pack.
                 w, h = image.size
                 if min(w, h) < 9 or max(w, h) > 4096 or w*h > 8_000_000:
                     return {'status': 'unsupported'}

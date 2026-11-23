@@ -55,6 +55,16 @@ class DiagnosticsTests(unittest.TestCase):
     def test_empty_state_still_exports(self):
         with zipfile.ZipFile(d.export()) as z:
             self.assertIn('summary.json',z.namelist())
+    def test_bitmap_cache_performance_is_numeric_and_private(self):
+        (d.STATE/'bitmap-bridge-progress.json').write_text(json.dumps({
+            'performancePatch':'4k-dib-cache',
+            'performance':{'bitmapCacheHits':100,'calls':101,'source':'private.gif','matchMs':'private-path'}}))
+        with zipfile.ZipFile(d.export()) as z:
+            performance=json.loads(z.read('summary.json'))['performance']
+            self.assertEqual(performance['patch'],'4k-dib-cache')
+            self.assertEqual(performance['bitmapCacheHits'],100)
+            self.assertNotIn('source',performance)
+            self.assertNotIn('matchMs',performance)
 
     def test_render_dimensions_have_no_source_identity(self):
         progress={'bySource':{'private-source-a':{'width':200,'height':200},'private-source-b':{'width':200,'height':200},
