@@ -1,4 +1,11 @@
 // Optional display-only filter for the inspected legacy x86 chat renderer.
+function photoMatchesSenderGroup(group, x, y) {
+  // Text messages may sit between the sender label and the first photo.
+  // The next avatar ends the group; vertical distance alone must not end it.
+  return Boolean(group && Math.abs(x - group.x) <= group.tolerance &&
+    y >= group.nextY - group.tolerance);
+}
+
 function photoHoverFilter() {
   const unavailable = {configure() {}, tick() {}, restore() {}, status: () => ({available: false})};
   if (Process.arch !== 'ia32') return unavailable;
@@ -97,7 +104,7 @@ function photoHoverFilter() {
     }
     if (w < 30 || h < 30) return;
     const group = paint.group;
-    if (!compact.has(photoNode) && (!group || Math.abs(x - group.x) > group.tolerance || Math.abs(y - group.nextY) > group.tolerance)) {
+    if (!compact.has(photoNode) && !photoMatchesSenderGroup(group, x, y)) {
       paint.group = null;
       return;
     }
