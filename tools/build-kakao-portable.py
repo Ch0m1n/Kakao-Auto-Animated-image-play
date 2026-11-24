@@ -12,7 +12,7 @@ for relative in ['tools', 'runtime', 'artifacts/kakao-internals/deps', 'dist/cod
     (DEST/relative).mkdir(parents=True, exist_ok=True)
 shutil.copy2(ROOT/'version.json', DEST/'version.json')
 for name in ['kakao-portable-launcher.py','kakao_update.py','kakao_diagnostics.py','kakao-autoplay-service.py','trace-kakao-player.py',
-             'kakao-bitmap-bridge.js','kakao-auto-bridge.js','kakao-original-download.js',
+             'kakao-bitmap-bridge.js','kakao-auto-bridge.js','kakao-original-download.js','kakao-photo-hover.js',
              'kakao_qt_worker.py','kakao-qt-live.js','kakao-qt-photo.qml',
              'kakao-gif-discovery.py','kakao-webp-frames.py','kakao_download_startup.py','kakao_lifetime.py','kakao_install.py','KAKAO-GIF-EXPERIMENT.md']:
     shutil.copy2(ROOT/'tools'/name, DEST/'tools'/name)

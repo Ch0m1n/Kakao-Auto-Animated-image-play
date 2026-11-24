@@ -316,6 +316,8 @@ listeners.push(Interceptor.attach(kernel.getExportByName('CreateFileW'),{onEnter
   this.gif=null;if(busy||stopped)return;
   try{const path=args[0].readUtf16String();if(path&&path.length<1024&&/\.(gif|webp)$/i.test(path))this.gif=path;}catch(_){}
 },onLeave(result){if(this.gif&&!result.equals(ptr(-1))&&observed.size<256)observed.add(this.gif);}}));
+const photoHover = typeof photoHoverFilter === 'function' ? photoHoverFilter() : null;
+const photoHoverTimer = photoHover ? setInterval(() => photoHover.tick(), 60) : null;
 function tick(){
   if(stopped)return;
   watchedWindows=watchedWindows.filter(w=>windowPid(w,pidOut)===uiThread&&pidOut.readU32()===Process.id);
@@ -335,11 +337,12 @@ function tick(){
 timer=setTimeout(tick,100);
 rpc.exports={
   setwindows(handles){watchedWindows=[...new Set(handles)].map(w=>ptr(w)).filter(w=>windowPid(w,pidOut)===uiThread&&pidOut.readU32()===Process.id);return watchedWindows.length;},
+  setphotofilter(room,sender){if(photoHover)photoHover.configure(room,sender);},
   registerfile:register,unregister,activate,
   registerpreview(path,id,meta){return register(path,id,meta);},
   updatepath(id,path){const s=sources.get(id);if(s&&!s.external)s.path=path;},
   work(){const files=[...observed];observed.clear();return {files,pending:[...pending]};},
-  snapshot(){return {...stats,windows:watchedWindows.map(w=>w.toString()),referenceBytes:refBytes,decodedBytes};},
-  stop(){if(cleaned)return;cleaned=true;stopped=true;clearTimeout(timer);for(const l of listeners)l.detach();for(const s of sources.values())release(s);sources.clear();buckets.clear();cache.clear();for(const w of watchedWindows)refreshConversation(w);}
+  snapshot(){return {...stats,windows:watchedWindows.map(w=>w.toString()),referenceBytes:refBytes,decodedBytes,photoFilter:photoHover?.status()};},
+  stop(){if(cleaned)return;cleaned=true;stopped=true;clearTimeout(timer);if(photoHoverTimer)clearInterval(photoHoverTimer);for(const l of listeners)l.detach();for(const s of sources.values())release(s);sources.clear();buckets.clear();cache.clear();for(const w of watchedWindows)refreshConversation(w);}
 };
 send({status:'bridge-armed',mode:'automatic-multiple-gifs'});

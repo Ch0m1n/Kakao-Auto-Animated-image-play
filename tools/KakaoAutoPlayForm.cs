@@ -67,23 +67,41 @@ internal class AutoPlayForm : Form
     public void RestoreWindow(){Show();WindowState=FormWindowState.Normal;Activate();}
     void ExitApplication(){if(busy){RestoreWindow();notice.Text="작업을 마친 뒤 완전 종료를 다시 눌러 주세요.";return;}exitRequested=true;Close();}
     void ShowOptions(){
-        using(var dialog=new Form {Text="Kakao AutoPlay 옵션",ClientSize=new Size(390,160),FormBorderStyle=FormBorderStyle.FixedDialog,StartPosition=FormStartPosition.CenterParent,MaximizeBox=false,MinimizeBox=false,Font=Font}) {
+        using(var dialog=new Form {Text="Kakao AutoPlay 옵션",ClientSize=new Size(390,316),FormBorderStyle=FormBorderStyle.FixedDialog,StartPosition=FormStartPosition.CenterParent,MaximizeBox=false,MinimizeBox=false,Font=Font}) {
             var label=new Label {Text="창의 X 버튼을 누르면",Left=20,Top=20,AutoSize=true};
             var choices=new ComboBox {Left=20,Top=50,Width=350,DropDownStyle=ComboBoxStyle.DropDownList};
             choices.Items.AddRange(new object[]{"트레이로 숨기고 계속 재생 (기본)","프로그램과 재생 작업 종료"});choices.SelectedIndex=closeToTray?0:1;
-            var save=new Button {Text="저장",Left=280,Top=110,Width=90};
+            var filterLabel=new Label {Text="마우스를 올릴 때만 사진 표시 (32비트 카톡)",Left=20,Top=100,AutoSize=true};
+            var roomLabel=new Label {Text="채팅방 이름",Left=20,Top=140,AutoSize=true};
+            var senderLabel=new Label {Text="보낸 사람",Left=20,Top=180,AutoSize=true};
+            var room=new TextBox {Left=130,Top=136,Width=240,MaxLength=255,AccessibleName=roomLabel.Text};
+            var sender=new TextBox {Left=130,Top=176,Width=240,MaxLength=255,AccessibleName=senderLabel.Text};
+            var help=new Label {Text="끄려면 두 칸을 비우고 저장하세요.",Left=20,Top=224,AutoSize=true};
+            try {
+                var values=json.Deserialize<Dictionary<string,object>>(File.ReadAllText(settingsPath));
+                room.Text=Value(values,"photoFilterRoom","");
+                sender.Text=Value(values,"photoFilterSender","");
+            }catch{}
+            var save=new Button {Text="저장",Left=280,Top=270,Width=90};
             save.Click+=delegate {
                 try {
+                    string filterRoom=room.Text.Trim(),filterSender=sender.Text.Trim();
+                    if((filterRoom.Length==0)!=(filterSender.Length==0)) {
+                        MessageBox.Show(dialog,"채팅방 이름과 보낸 사람을 모두 입력해 주세요.");
+                        return;
+                    }
                     var values=new Dictionary<string,object>();
                     if(File.Exists(settingsPath))values=json.Deserialize<Dictionary<string,object>>(File.ReadAllText(settingsPath))??values;
                     values["closeToTray"]=choices.SelectedIndex==0;
+                    values["photoFilterRoom"]=filterRoom;
+                    values["photoFilterSender"]=filterSender;
                     Directory.CreateDirectory(Path.GetDirectoryName(settingsPath));
                     string temp=settingsPath+"."+Guid.NewGuid().ToString("N")+".tmp";
                     try{File.WriteAllText(temp,json.Serialize(values),Encoding.UTF8);if(File.Exists(settingsPath))File.Replace(temp,settingsPath,null);else File.Move(temp,settingsPath);}finally{if(File.Exists(temp))File.Delete(temp);}
                     closeToTray=choices.SelectedIndex==0;dialog.Close();
                 }catch(Exception error){MessageBox.Show(dialog,"설정을 저장하지 못했어요: "+error.Message);}
             };
-            dialog.Controls.AddRange(new Control[]{label,choices,save});dialog.AcceptButton=save;dialog.ShowDialog(this);
+            dialog.Controls.AddRange(new Control[]{label,choices,filterLabel,roomLabel,room,senderLabel,sender,help,save});dialog.AcceptButton=save;dialog.ShowDialog(this);
         }
     }
     public AutoPlayForm(string bundle,string previousBundle=null,bool resume=false,bool startInTray=false) {
