@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -148,7 +149,23 @@ session = None
 if args.bridge:
     source = 'const BRIDGE_CONFIG = ' + json.dumps({'hwnd': args.chat_window, 'managed': bool(args.control_file), 'sourceFile': str(args.source_gif) if args.source_gif else None}) + ';\n' + (ROOT / 'tools/kakao-bitmap-bridge.js').read_text(encoding='utf-8')
     if args.auto_gifs:
-        source = source.split('const hwnd=')[0] + (ROOT / 'tools/kakao-auto-bridge.js').read_text(encoding='utf-8')
+        source = source.split('const hwnd=')[0] + '\n'.join(
+            (ROOT / 'tools' / name).read_text(encoding='utf-8')
+            for name in ('kakao-compact-media.js', 'kakao-photo-hover.js', 'kakao-auto-bridge.js')
+        )
+
+def read_photo_filter():
+    settings = Path(os.environ['LOCALAPPDATA']) / 'KakaoAutoPlay/settings.json'
+    try:
+        values = json.loads(settings.read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return ('', '', False)
+    if not isinstance(values, dict):
+        return ('', '', False)
+    room, sender = (values.get(key) for key in ('photoFilterRoom', 'photoFilterSender'))
+    if all(isinstance(value, str) and 0 < len(value) < 256 for value in (room, sender)):
+        return (room, sender, values.get('photoFilterHide', False) is True)
+    return ('', '', False)
 discovery = None
 if args.auto_gifs:
     import importlib.util
@@ -185,6 +202,7 @@ try:
     script = session.create_script(source, runtime='v8')
     script.on('message', on_message)
     script.load()
+    photo_filter = ('', '', False)
     if args.download_originals and target_arch=='ia32':
         import ctypes
         from ctypes import wintypes
@@ -225,6 +243,11 @@ try:
                 if control['pid'] != args.pid:
                     raise RuntimeError('Supervisor process identity changed')
                 script.exports_sync.setwindows(control['windows'])
+                if args.auto_gifs and target_arch == 'ia32':
+                    selected_filter = read_photo_filter()
+                    if selected_filter != photo_filter:
+                        script.exports_sync.setphotofilter(*selected_filter)
+                        photo_filter = selected_filter
             except (OSError, json.JSONDecodeError):
                 pass  # A transient replacement/read error is retried next poll.
         if discovery is not None:
@@ -273,6 +296,10 @@ finally:
             report['download_cleanup_error'] = str(error)
     if script is not None:
         try:
+            if args.auto_gifs and target_arch == 'ia32':
+                script.exports_sync.restorephotos()
+                while script.exports_sync.snapshot().get('photoFilter', {}).get('restoring'):
+                    time.sleep(.05)
             script.exports_sync.stop()
         except Exception as error:
             report['cleanup_error'] = str(error)
