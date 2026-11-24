@@ -1,12 +1,13 @@
 // Optional display-only filter for the inspected legacy x86 chat renderer.
 function photoHoverFilter() {
-  const unavailable = {configure() {}, tick() {}, status: () => ({available: false})};
+  const unavailable = {configure() {}, tick() {}, restore() {}, status: () => ({available: false})};
   if (Process.arch !== 'ia32') return unavailable;
 
   const photoCall = app.base.add(0x135e7f3);
   const imageDraw = app.base.add(0x13ab370);
   if (photoCall.readU8() !== 0xe8 || !photoCall.add(5).add(photoCall.add(1).readS32()).equals(imageDraw) ||
       photoCall.add(5).readU32() !== 0x8bde458a) return unavailable;
+  if (Array.from(new Uint8Array(app.base.add(0x1334f70).readByteArray(7))).join(',') !== '85,139,236,139,85,8,86') return unavailable;
 
   const begin = user.getExportByName('BeginPaint');
   const end = user.getExportByName('EndPaint');
@@ -24,6 +25,8 @@ function photoHoverFilter() {
   const photoReturn = photoCall.add(5);
   const textReturn = app.base.add(0xf1ce5b);
   const blendReturn = app.base.add(0x13ab46e);
+  const compact = compactMedia();
+  let photoNode = null, hidePhotos = false;
   let room = '', sender = '', paint = null, draw = null, hovered = null;
   let masked = 0, revealed = 0;
   const regions = new Map();
@@ -59,7 +62,10 @@ function photoHoverFilter() {
     onEnter() {
       if (this.threadId !== uiThread || !paint) return;
       if (this.returnAddress.equals(profileReturn)) this.kind = 'profile';
-      if (paint.group && this.returnAddress.equals(photoReturn)) this.kind = 'photo';
+      if (this.returnAddress.equals(photoReturn)) {
+        photoNode = this.context.edi;
+        if (paint.group || compact.has(photoNode)) this.kind = 'photo';
+      }
       if (this.kind) {
         this.previousDraw = draw;
         draw = this.kind;
@@ -76,7 +82,8 @@ function photoHoverFilter() {
     if (y !== avatar.y || x < avatar.x + avatar.w || x > avatar.x + avatar.w * 2) return;
     paint.avatar = null;
     const label = args[1].readUtf16String(n < 0 ? undefined : n);
-    if (label && (label === sender || label.startsWith(sender + '(') || label.startsWith(sender + ' ('))) {
+    const name = (label || '').split('(')[0].trim();
+    if (sender.split(',').map(s => s.split('(')[0].trim()).includes(name)) {
       paint.group = {x, nextY: y + avatar.w * 0.5, tolerance: avatar.w * 0.2};
     }
   }}));
@@ -90,31 +97,38 @@ function photoHoverFilter() {
     }
     if (w < 30 || h < 30) return;
     const group = paint.group;
-    if (Math.abs(x - group.x) > group.tolerance || Math.abs(y - group.nextY) > group.tolerance) {
+    if (!compact.has(photoNode) && (!group || Math.abs(x - group.x) > group.tolerance || Math.abs(y - group.nextY) > group.tolerance)) {
       paint.group = null;
       return;
     }
-    group.nextY = y + h + group.tolerance / 2;
+    if (group) group.nextY = y + h + group.tolerance / 2;
+    compact.remember(photoNode);
     const r = {x, y, w, h, window: paint.window};
-    regions.get(paint.key).push(r);
-    if (inside(paint.mouse, r)) {
+    regions.get(paint.key)?.push(r);
+    if (!hidePhotos || inside(paint.mouse, r)) {
       revealed++;
       return;
     }
     rect.writeS32(x); rect.add(4).writeS32(y); rect.add(8).writeS32(x + w); rect.add(12).writeS32(y + h);
-    fill(args[0], rect, brush);
-    args[10] = ptr(args[10].toUInt32() & 0xff00ffff);
+    this.cover = {dc:args[0], x, y, w, h};
     masked++;
+  }, onLeave() {
+    if (!this.cover) return;
+    const r = this.cover;
+    rect.writeS32(r.x); rect.add(4).writeS32(r.y); rect.add(8).writeS32(r.x+r.w); rect.add(12).writeS32(r.y+r.h);
+    fill(r.dc, rect, brush);
   }}));
 
   return {
-    configure(nextRoom, nextSender) {
-      if (room === nextRoom && sender === nextSender) return;
+    configure(nextRoom, nextSender, nextHide = false) {
+      if (room === nextRoom && sender === nextSender && hidePhotos === nextHide) return;
+      if (room !== nextRoom || sender !== nextSender) compact.restore();
       for (const list of regions.values()) if (list.length) repaint(list[0]);
       regions.clear();
       hovered = null;
       room = nextRoom;
       sender = nextSender;
+      hidePhotos = nextHide;
       if (room) for (const w of watchedWindows) refreshConversation(w);
     },
     tick() {
@@ -134,6 +148,7 @@ function photoHoverFilter() {
       if (next && (!hovered || !next.window.equals(hovered.window))) repaint(next);
       hovered = next;
     },
-    status: () => ({available: true, enabled: Boolean(room), masked, revealed})
+    restore() { room = ''; compact.restore(true); },
+    status: () => ({available: true, enabled: Boolean(room), masked, revealed, ...compact.status()})
   };
 }

@@ -337,7 +337,8 @@ function tick(){
 timer=setTimeout(tick,100);
 rpc.exports={
   setwindows(handles){watchedWindows=[...new Set(handles)].map(w=>ptr(w)).filter(w=>windowPid(w,pidOut)===uiThread&&pidOut.readU32()===Process.id);return watchedWindows.length;},
-  setphotofilter(room,sender){if(photoHover)photoHover.configure(room,sender);},
+  setphotofilter(room,sender,hide=false){if(photoHover)photoHover.configure(room,sender,hide);},
+  restorephotos(){if(photoHover)photoHover.restore();},
   registerfile:register,unregister,activate,
   registerpreview(path,id,meta){return register(path,id,meta);},
   updatepath(id,path){const s=sources.get(id);if(s&&!s.external)s.path=path;},

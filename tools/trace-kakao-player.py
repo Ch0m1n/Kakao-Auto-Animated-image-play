@@ -151,7 +151,7 @@ if args.bridge:
     if args.auto_gifs:
         source = source.split('const hwnd=')[0] + '\n'.join(
             (ROOT / 'tools' / name).read_text(encoding='utf-8')
-            for name in ('kakao-photo-hover.js', 'kakao-auto-bridge.js')
+            for name in ('kakao-compact-media.js', 'kakao-photo-hover.js', 'kakao-auto-bridge.js')
         )
 
 def read_photo_filter():
@@ -159,13 +159,13 @@ def read_photo_filter():
     try:
         values = json.loads(settings.read_text(encoding='utf-8-sig'))
     except (OSError, ValueError):
-        return ('', '')
+        return ('', '', False)
     if not isinstance(values, dict):
-        return ('', '')
+        return ('', '', False)
     room, sender = (values.get(key) for key in ('photoFilterRoom', 'photoFilterSender'))
     if all(isinstance(value, str) and 0 < len(value) < 256 for value in (room, sender)):
-        return (room, sender)
-    return ('', '')
+        return (room, sender, values.get('photoFilterHide', False) is True)
+    return ('', '', False)
 discovery = None
 if args.auto_gifs:
     import importlib.util
@@ -202,7 +202,7 @@ try:
     script = session.create_script(source, runtime='v8')
     script.on('message', on_message)
     script.load()
-    photo_filter = ('', '')
+    photo_filter = ('', '', False)
     if args.download_originals and target_arch=='ia32':
         import ctypes
         from ctypes import wintypes
@@ -296,6 +296,10 @@ finally:
             report['download_cleanup_error'] = str(error)
     if script is not None:
         try:
+            if args.auto_gifs and target_arch == 'ia32':
+                script.exports_sync.restorephotos()
+                while script.exports_sync.snapshot().get('photoFilter', {}).get('restoring'):
+                    time.sleep(.05)
             script.exports_sync.stop()
         except Exception as error:
             report['cleanup_error'] = str(error)
