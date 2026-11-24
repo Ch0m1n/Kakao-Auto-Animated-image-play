@@ -87,11 +87,11 @@ v11.0.0부터 `업데이트 확인` 버튼으로 이 저장소의 최신 정식 
 
 ### 새 버전 배포하기
 
-1. `version.json`의 버전을 올리고 변경 사항을 커밋·푸시한다.
-2. 같은 버전 태그(예: `v11.1.0`)를 생성하여 푸시한다.
-3. GitHub Actions의 **Build and publish release**를 실행하고 태그를 입력한다.
+개발자는 기능 브랜치에 `version.json`의 새 버전과 `docs/releases/v<버전>.md`를 포함한다. **검토자는 해당 PR을 main에 합치기만 하면 된다.** 태그 생성, 로컬 빌드, 파일 업로드, Release 게시를 직접 할 필요가 없다.
 
-워크플로는 해당 태그를 체크아웃해 테스트·빌드하고 `KakaoAutoPlay.exe`와 `SHA256SUMS.txt`를 업로드한 뒤 정식 Release를 공개한다. 초안/사전 출시 버전은 프로그램의 업데이트 대상으로 사용하지 않는다. 실행 파일 이름은 반드시 `KakaoAutoPlay.exe`여야 한다.
+PR에서는 테스트·빌드·실행 파일 자체 검사를 수행한다. main에 새 버전이 합쳐지면 GitHub Actions가 같은 검사를 다시 수행한 뒤 해당 커밋에 태그를 만들고 `KakaoAutoPlay.exe`와 `SHA256SUMS.txt`를 첨부한 최신 정식 Release를 자동 게시한다. 빌드가 실패하면 배포하지 않으며, 성공할 때까지 기존 업데이트가 유지된다. 합병 직후가 아니라 Actions가 완료된 뒤 사용자의 **업데이트 확인**에 새 버전이 나온다.
+
+실패한 Actions는 **Re-run failed jobs**로 재시도할 수 있다. 업로드가 중단된 초안은 다시 채우며 이미 공개한 버전은 덮어쓰지 않는다. 기존 태그를 수동 재배포할 때는 **Build and publish release → Run workflow**에 태그를 입력할 수도 있다. 초안/사전 출시 버전은 업데이트 대상으로 사용하지 않으며 실행 파일 이름은 반드시 `KakaoAutoPlay.exe`여야 한다.
 
 ## 제한과 저장소 범위
 

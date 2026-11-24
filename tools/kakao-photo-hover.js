@@ -25,9 +25,11 @@ function photoHoverFilter() {
   const atPoint = fn(user, 'WindowFromPoint', 'pointer', ['int', 'int']);
   const fill = fn(user, 'FillRect', 'int', ['pointer', 'pointer', 'pointer']);
   const brush = fn(user, 'GetSysColorBrush', 'pointer', ['int'])(15);
+  const getDC = fn(user, 'GetDC', 'pointer', ['pointer']);
+  const releaseDC = fn(user, 'ReleaseDC', 'int', ['pointer', 'pointer']);
+  const rect = Memory.alloc(16);
   const paintBuffer = Memory.alloc(512);
   const point = Memory.alloc(8);
-  const rect = Memory.alloc(16);
   const profileReturn = app.base.add(0x780ef0);
   const photoReturn = photoCall.add(5);
   const textReturn = app.base.add(0xf1ce5b);
@@ -60,10 +62,22 @@ function photoHoverFilter() {
     if (!readTitle(root, paintBuffer, 256) || paintBuffer.readUtf16String() !== room) return;
     const key = window.toString();
     regions.set(key, []);
-    paint = {window, key, avatar: null, group: null, mouse: mouseIn(window)};
+    paint = {window, key, avatar: null, group: null, mouse: mouseIn(window), covers: []};
   }}));
   listeners.push(Interceptor.attach(end, {onEnter(args) {
-    if (this.threadId === uiThread && paint && args[0].equals(paint.window)) paint = null;
+    if (this.threadId !== uiThread || !paint || !args[0].equals(paint.window)) return;
+    if (paint.covers.length) {
+      const dc = getDC(paint.window);
+      if (!dc.isNull()) {
+        for (const r of paint.covers) {
+          rect.writeS32(r.x); rect.add(4).writeS32(r.y);
+          rect.add(8).writeS32(r.x + r.w); rect.add(12).writeS32(r.y + r.h);
+          fill(dc, rect, brush);
+        }
+        releaseDC(paint.window, dc);
+      }
+    }
+    paint = null;
   }}));
   listeners.push(Interceptor.attach(imageDraw, {
     onEnter() {
@@ -116,14 +130,11 @@ function photoHoverFilter() {
       revealed++;
       return;
     }
-    rect.writeS32(x); rect.add(4).writeS32(y); rect.add(8).writeS32(x + w); rect.add(12).writeS32(y + h);
-    this.cover = {dc:args[0], x, y, w, h};
+    // Suppress the source before compositing. Painting over the intermediate DC
+    // afterwards can lose its alpha and leave the original photo visible.
+    args[10] = ptr(args[10].toUInt32() & 0xff00ffff);
+    paint.covers.push(r);
     masked++;
-  }, onLeave() {
-    if (!this.cover) return;
-    const r = this.cover;
-    rect.writeS32(r.x); rect.add(4).writeS32(r.y); rect.add(8).writeS32(r.x+r.w); rect.add(12).writeS32(r.y+r.h);
-    fill(r.dc, rect, brush);
   }}));
 
   return {
@@ -139,7 +150,7 @@ function photoHoverFilter() {
       if (room) for (const w of watchedWindows) refreshConversation(w);
     },
     tick() {
-      if (!room) return;
+      if (!room || !hidePhotos) return;
       let next = null;
       for (const [key, list] of regions) {
         if (!list.length || !watchedWindows.some(w => w.equals(getParent(list[0].window)))) {

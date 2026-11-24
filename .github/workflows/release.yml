@@ -1,19 +1,32 @@
 name: Build and publish release
 on:
+  push:
+    branches: [main]
+    paths:
+      - version.json
+      - .github/workflows/release.yml
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
         description: 'Release tag matching version.json (e.g. v11.0.0)'
         required: true
 permissions:
-  contents: write
+  contents: read
+concurrency:
+  group: release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'publish' }}
+  cancel-in-progress: false
 jobs:
-  release:
+  build:
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -22,18 +35,25 @@ jobs:
         with:
           node-version: '24'
       - name: Check version and prepare dependencies
+        id: version
         shell: pwsh
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           $version = (Get-Content version.json -Raw | ConvertFrom-Json).version
-          if ($env:RELEASE_TAG -ne "v$version") { throw 'Tag/version mismatch' }
+          if ($version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw 'Invalid release version' }
+          if ($env:RELEASE_TAG -and $env:RELEASE_TAG -ne "v$version") { throw 'Tag/version mismatch' }
+          if (!(Test-Path "docs/releases/v$version.md")) { throw 'Release notes are missing' }
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          "commit=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
           ./tools/prepare-dev.ps1 -PythonPath (Get-Command python).Source
       - name: Test updater and rendering
         shell: pwsh
         run: |
           python tools/test-kakao-update.py
           if ($LASTEXITCODE) { throw 'Updater test failed' }
+          python tools/test-kakao-release.py
+          if ($LASTEXITCODE) { throw 'Release publication test failed' }
           python tools/test-kakao-startup-migration.py
           if ($LASTEXITCODE) { throw 'Startup migration test failed' }
           node tools/test-kakao-resolution.cjs
@@ -46,6 +66,8 @@ jobs:
           if ($LASTEXITCODE) { throw 'Qt playback test failed' }
           node tools/test-kakao-download-pump.cjs
           if ($LASTEXITCODE) { throw 'Download queue test failed' }
+          node tools/test-kakao-photo-hover.cjs
+          if ($LASTEXITCODE) { throw 'Sender photo test failed' }
           python tools/test-kakao-resolution-native.py
           if ($LASTEXITCODE) { throw 'Native x86 rendering test failed' }
           python tools/test-kakao-resolution-native.py --x64
@@ -58,13 +80,33 @@ jobs:
           if ($test.ExitCode) { throw 'Packaged runtime self-test failed' }
           $hash = (Get-FileHash artifacts/KakaoAutoPlay.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  KakaoAutoPlay.exe" | Set-Content artifacts/SHA256SUMS.txt
-      - name: Publish release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            artifacts/KakaoAutoPlay.exe
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+  publish:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: artifacts
+      - name: Publish verified release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
         run: |
-          gh release create $env:RELEASE_TAG artifacts/KakaoAutoPlay.exe artifacts/SHA256SUMS.txt --verify-tag --draft --title "Kakao AutoPlay $env:RELEASE_TAG" --notes-file "docs/releases/$env:RELEASE_TAG.md"
-          if ($LASTEXITCODE) { throw 'Release upload failed' }
-          gh release edit $env:RELEASE_TAG --draft=false --latest
-          if ($LASTEXITCODE) { throw 'Release publication failed' }
+          ./tools/publish-kakao-release.ps1 -Tag $env:RELEASE_TAG
