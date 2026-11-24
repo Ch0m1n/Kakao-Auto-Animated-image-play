@@ -12,8 +12,14 @@ identity=work/'fixture.json';identity.unlink(missing_ok=True)
 process=subprocess.Popen([str(ROOT/('artifacts/tests/autoplay-agent-load'+('-x64' if ARCH=='x64' else '')+'/KakaoTalk.exe')),str(identity)],creationflags=0x08000000)
 session=None
 try:
-    for _ in range(100):
-        if identity.exists():break
+    # A fresh hosted Windows runner may take longer than five seconds to start
+    # the .NET fixture. Still fail on process exit or an explicit deadline.
+    deadline=time.monotonic()+45
+    while not identity.exists():
+        if process.poll() is not None:
+            raise RuntimeError(f'Native {ARCH} fixture exited before readiness: {process.returncode}')
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f'Native {ARCH} fixture did not publish readiness within 45 seconds')
         time.sleep(.05)
     info=json.loads(identity.read_text());assert info['pid']==process.pid and process.poll() is None
     session=frida.attach(process.pid)
